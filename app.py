@@ -57,7 +57,7 @@ DB_CONFIG = {
 }
 
 # Configure Google API - replace with your API key
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyCD6DGeERwWQbBC6BK1Hq0ecagQj72rqyQ")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyD2ArK74wBtL1ufYmpyrV2LqaOBrSi3mlU")
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # Document types
@@ -130,42 +130,62 @@ for field in FIELDS:
     DOCUMENT_FIELDS[doc_type].append(field["name"])
 
 class DocumentProcessor:
-    """Helper class for document processing operations"""
+    """Helper class for document processing operations using Gemini's multimodal capabilities"""
     
     @staticmethod
     def perform_ocr(file_data: bytes, file_type: str) -> Dict[str, Any]:
-        """Perform OCR on the file data based on file type."""
+        """Process documents using Gemini's multimodal capabilities instead of Tesseract OCR."""
         try:
             result = {"text": "", "pages": []}
             
+            # Initialize Gemini model with multimodal capabilities
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            
             if file_type.lower() in ["image/jpeg", "image/jpg", "image/png", "image/tiff"]:
-                # Process image directly
-                image = Image.open(io.BytesIO(file_data))
-                text = pytesseract.image_to_string(image)
+                # Process image directly with Gemini
+                response = model.generate_content(
+                    [
+                        "Extract all text from this document image. Return only the extracted text without additional comments.",
+                        {"mime_type": file_type, "data": file_data}
+                    ]
+                )
+                text = response.text.strip()
                 result["text"] = text
                 result["pages"].append({"page_num": 1, "text": text})
                 
             elif file_type.lower() in ["application/pdf", "pdf"]:
-                # Convert PDF to images and process each page
+                # Convert PDF to images and process each page with Gemini
                 images = convert_from_bytes(file_data)
                 full_text = ""
                 
                 for i, image in enumerate(images):
-                    page_text = pytesseract.image_to_string(image)
+                    # Convert PIL image to bytes
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format="PNG")
+                    img_bytes = img_byte_arr.getvalue()
+                    
+                    # Process with Gemini
+                    response = model.generate_content(
+                        [
+                            "Extract all text from this document image. Return only the extracted text without additional comments.",
+                            {"mime_type": "image/png", "data": img_bytes}
+                        ]
+                    )
+                    page_text = response.text.strip()
                     full_text += page_text + "\n\n"
                     result["pages"].append({"page_num": i+1, "text": page_text})
                 
                 result["text"] = full_text
                 
             else:
-                logger.warning(f"Unsupported file type for OCR: {file_type}")
-                result["text"] = "Unsupported file type for OCR"
+                logger.warning(f"Unsupported file type for Gemini processing: {file_type}")
+                result["text"] = "Unsupported file type for processing"
                 result["error"] = f"Unsupported file type: {file_type}"
                 
             return result
             
         except Exception as e:
-            logger.error(f"Error during OCR processing: {str(e)}")
+            logger.error(f"Error during Gemini document processing: {str(e)}")
             return {"error": str(e), "text": "", "pages": []}
     
     @staticmethod
@@ -175,7 +195,7 @@ class DocumentProcessor:
             model = genai.GenerativeModel("gemini-1.5-flash")
             
             prompt = """
-            You are a document classification expert. Examine the following text extracted via OCR and determine which type of financial document it is.
+            You are a document classification expert. Examine the following text extracted from a document and determine which type of financial document it is.
             
             Classify the document into EXACTLY ONE of these categories:
             - customer_request_letter
@@ -324,7 +344,7 @@ class DocumentProcessor:
             
             For each field:
             1. Extract the exact value as it appears in the document
-            2. If the text is unclear due to OCR issues, make a reasonable approximation
+            2. If the text is unclear, make a reasonable approximation
             3. For dates, standardize to YYYY-MM-DD format where possible
             4. For monetary amounts, include both value and currency
             5. Assign a confidence score between 0.0 and 1.0 for each extraction
@@ -378,7 +398,206 @@ class DocumentProcessor:
                     "error": str(e)
                 }
             }
-
+            
+    @staticmethod
+    def process_multimodal_document(file_data: bytes, file_type: str) -> Dict[str, Any]:
+        """Process a document using Gemini's multimodal capabilities for both classification and extraction."""
+        try:
+            # Initialize Gemini model with multimodal capabilities
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            result = {}
+            
+            # For images, process directly
+            if file_type.lower() in ["image/jpeg", "image/jpg", "image/png", "image/tiff"]:
+                # First, classify the document type using the image directly
+                classification_prompt = """
+                You are a document classification expert. Examine this document image and determine which type of financial document it is.
+                
+                Classify the document into EXACTLY ONE of these categories:
+                - customer_request_letter
+                - form_15ca
+                - form_15cb
+                - form_a2
+                - invoice
+                - transport_document
+                - fdd_stationery
+                - unknown
+                
+                Return ONLY a JSON with the document_type and confidence, like:
+                {"document_type": "category_name", "confidence": 0.X}
+                """
+                
+                classification_response = model.generate_content([
+                    classification_prompt,
+                    {"mime_type": file_type, "data": file_data}
+                ])
+                
+                json_str = classification_response.text.strip()
+                if json_str.startswith("```json"):
+                    json_str = json_str[7:]
+                if json_str.endswith("```"):
+                    json_str = json_str[:-3]
+                    
+                classification = json.loads(json_str.strip())
+                document_type = classification["document_type"]
+                confidence = classification["confidence"]
+                
+                # Now extract text and fields based on the document type
+                doc_fields = DOCUMENT_FIELDS.get(document_type, [])
+                fields_str = ", ".join(doc_fields)
+                
+                extraction_prompt = f"""
+                This is a {document_type.replace('_', ' ')} document. 
+                Extract all text content AND the following fields: {fields_str}.
+                
+                For each field, provide the value and a confidence score between 0.0 and 1.0.
+                Format your response as a JSON with two parts:
+                1. "full_text": The complete text from the document
+                2. "extracted_fields": An array of objects with field_name, value, and confidence
+                """
+                
+                extraction_response = model.generate_content([
+                    extraction_prompt,
+                    {"mime_type": file_type, "data": file_data}
+                ])
+                
+                extraction_json_str = extraction_response.text.strip()
+                if extraction_json_str.startswith("```json"):
+                    extraction_json_str = extraction_json_str[7:]
+                if extraction_json_str.endswith("```"):
+                    extraction_json_str = extraction_json_str[:-3]
+                
+                extraction_result = json.loads(extraction_json_str.strip())
+                
+                # Combine the results
+                result = {
+                    "document_type": document_type,
+                    "confidence": confidence,
+                    "text": extraction_result.get("full_text", ""),
+                    "extracted_fields": extraction_result.get("extracted_fields", []),
+                    "pages": [{"page_num": 1, "text": extraction_result.get("full_text", "")}]
+                }
+                
+            elif file_type.lower() in ["application/pdf", "pdf"]:
+                # For PDFs, we still need to convert to images and process page by page
+                images = convert_from_bytes(file_data)
+                full_text = ""
+                all_fields = []
+                document_type_votes = {}
+                
+                for i, image in enumerate(images):
+                    # Convert PIL image to bytes
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format="PNG")
+                    img_bytes = img_byte_arr.getvalue()
+                    
+                    # If it's the first page, classify the document
+                    if i == 0:
+                        classification_prompt = """
+                        You are a document classification expert. Examine this document image and determine which type of financial document it is.
+                        
+                        Classify the document into EXACTLY ONE of these categories:
+                        - customer_request_letter
+                        - form_15ca
+                        - form_15cb
+                        - form_a2
+                        - invoice
+                        - transport_document
+                        - fdd_stationery
+                        - unknown
+                        
+                        Return ONLY a JSON with the document_type and confidence, like:
+                        {"document_type": "category_name", "confidence": 0.X}
+                        """
+                        
+                        classification_response = model.generate_content([
+                            classification_prompt,
+                            {"mime_type": "image/png", "data": img_bytes}
+                        ])
+                        
+                        json_str = classification_response.text.strip()
+                        if json_str.startswith("```json"):
+                            json_str = json_str[7:]
+                        if json_str.endswith("```"):
+                            json_str = json_str[:-3]
+                            
+                        classification = json.loads(json_str.strip())
+                        document_type = classification["document_type"]
+                        document_type_votes[document_type] = classification["confidence"]
+                    
+                    # Extract text from each page
+                    text_prompt = "Extract all text from this document image. Return only the extracted text."
+                    text_response = model.generate_content([
+                        text_prompt,
+                        {"mime_type": "image/png", "data": img_bytes}
+                    ])
+                    page_text = text_response.text.strip()
+                    full_text += page_text + "\n\n"
+                    
+                # Determine final document type (use the one with highest confidence)
+                document_type = max(document_type_votes.items(), key=lambda x: x[1])[0] if document_type_votes else "unknown"
+                confidence = document_type_votes.get(document_type, 0.0)
+                
+                # Now extract fields based on the document type and the full text
+                doc_fields = DOCUMENT_FIELDS.get(document_type, [])
+                if doc_fields and full_text:
+                    fields_str = ", ".join(doc_fields)
+                    
+                    extraction_prompt = f"""
+                    This is a {document_type.replace('_', ' ')} document with the following text:
+                    
+                    {full_text[:4000]}  # Limit text if too long
+                    
+                    Extract the following fields: {fields_str}.
+                    
+                    For each field, provide the value and a confidence score between 0.0 and 1.0.
+                    Format your response as a JSON with an array of extracted_fields objects with field_name, value, and confidence.
+                    """
+                    
+                    extraction_response = model.generate_content(extraction_prompt)
+                    
+                    extraction_json_str = extraction_response.text.strip()
+                    if extraction_json_str.startswith("```json"):
+                        extraction_json_str = extraction_json_str[7:]
+                    if extraction_json_str.endswith("```"):
+                        extraction_json_str = extraction_json_str[:-3]
+                    
+                    extraction_result = json.loads(extraction_json_str.strip())
+                    all_fields = extraction_result.get("extracted_fields", [])
+                
+                # Combine the results
+                result = {
+                    "document_type": document_type,
+                    "confidence": confidence,
+                    "text": full_text,
+                    "extracted_fields": all_fields,
+                    "pages": [{"page_num": i+1, "text": page_text} for i, page_text in enumerate(full_text.split("\n\n"))]
+                }
+                
+            else:
+                logger.warning(f"Unsupported file type for Gemini processing: {file_type}")
+                result = {
+                    "error": f"Unsupported file type: {file_type}",
+                    "text": "",
+                    "pages": [],
+                    "document_type": "unknown",
+                    "confidence": 0.0,
+                    "extracted_fields": []
+                }
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error during multimodal document processing: {str(e)}")
+            return {
+                "error": str(e),
+                "text": "",
+                "pages": [],
+                "document_type": "unknown",
+                "confidence": 0.0,
+                "extracted_fields": []
+            }
+        
 def get_db_connection():
     """Create the database if it doesn't exist and return a connection."""
     try:
@@ -481,7 +700,7 @@ def init_db():
         raise
 
 def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id: str):
-    """Process multiple zip files and generate Excel report."""
+    """Process multiple zip files and generate Excel report using Gemini's multimodal capabilities."""
 
     logger.info(f"Starting process_zip_files for job {job_id}")
     logger.info(f"Number of files: {len(file_contents)}")
@@ -533,7 +752,7 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                 # Track document types in this folder
                 document_counts = Counter()
                 
-                # First pass: classify all documents
+                # First pass: process all documents with multimodal approach
                 for file in files:
                     if file.startswith('.') or file.startswith('~'):
                         continue  # Skip hidden files
@@ -563,18 +782,13 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                         with open(file_path, 'rb') as f:
                             file_data = f.read()
                         
-                        # Perform OCR
-                        ocr_result = DocumentProcessor.perform_ocr(file_data, file_type)
-                        if "error" in ocr_result:
-                            raise Exception(f"OCR failed: {ocr_result['error']}")
+                        # Process document with Gemini's multimodal capabilities
+                        # Use the new multimodal processing method that does both classification and extraction
+                        result = DocumentProcessor.process_multimodal_document(file_data, file_type)
                         
-                        # Classify document
-                        classification = DocumentProcessor.classify_document(ocr_result["text"])
-
-                        logger.info(f"classified: {classification}")
-
-                        doc_type = classification["document_type"]
-                        confidence = classification["confidence"]
+                        # Extract results
+                        doc_type = result.get("document_type", "unknown")
+                        confidence = result.get("confidence", 0.0)
                         
                         # Count document types
                         if doc_type != "unknown":
@@ -593,10 +807,35 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                             file_path, 
                             doc_type, 
                             confidence, 
-                            "classified"
+                            "processed"  # Mark as processed immediately since we already extracted fields
                         ))
+                        file_id = cursor.fetchone()[0]
+                        
+                        # Store extracted fields
+                        for field in result.get("extracted_fields", []):
+                            field_name = field.get("field_name", "")
+                            value = field.get("value", "")
+                            field_confidence = field.get("confidence", 0.0)
+                            reason = field.get("reason", "")
+                            
+                            cursor.execute('''
+                            INSERT INTO extracted_fields 
+                            (job_id, file_id, field_name, field_value, confidence, reason)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ''', (job_id, file_id, field_name, value, field_confidence, reason))
+                            
+                            # Add to folder results
+                            folder_results[folder_name].append({
+                                "filepath": file_path,
+                                "field_name": field_name,
+                                "value": value,
+                                "confidence": field_confidence,
+                                "reason": reason
+                            })
+                        
                         # Update total count immediately after each insertion
                         conn.commit()
+                        processed_files += 1
                         
                         # Every 2 files, update the job status for better progress tracking
                         if total_files % 2 == 0:
@@ -631,139 +870,39 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                 if dominant_type:
                     dominant_doc_type = dominant_type[0][0]
                     logger.info(f"Folder {folder_name}: Dominant document type is {dominant_doc_type}")
+                    
+                    # Mark files of other types as skipped but also include them in the results
+                    cursor.execute('''
+                    SELECT id, file_path, file_name, document_type FROM processed_files 
+                    WHERE job_id = %s AND folder_name = %s AND document_type != %s AND processing_status = 'processed'
+                    ''', (job_id, folder_name, dominant_doc_type))
+                    
+                    non_matching_files = cursor.fetchall()
+                    
+                    for file_id, file_path, file_name, doc_type in non_matching_files:
+                        try:
+                            # Update file status
+                            cursor.execute('''
+                            UPDATE processed_files 
+                            SET processing_status = 'skipped', error_message = 'Document type does not match dominant type in folder'
+                            WHERE id = %s
+                            ''', (file_id,))
+                            conn.commit()
+                            
+                            # Add to folder results with reason
+                            folder_results[folder_name].append({
+                                "filepath": file_path,
+                                "document_type": doc_type,
+                                "dominant_type": dominant_doc_type,
+                                "processing_status": "skipped",
+                                "reason": f"Document type '{doc_type}' does not match dominant type '{dominant_doc_type}' in folder"
+                            })
+                            
+                        except Exception as e:
+                            logger.error(f"Error marking non-matching file {file_path}: {str(e)}")
                 else:
                     dominant_doc_type = "unknown"
                     logger.warning(f"Folder {folder_name}: No valid documents found")
-                
-                # Second pass: process files that match the dominant type
-                cursor.execute('''
-                SELECT id, file_path, file_name FROM processed_files 
-                WHERE job_id = %s AND folder_name = %s AND document_type = %s AND processing_status = 'classified'
-                ''', (job_id, folder_name, dominant_doc_type))
-                
-                matching_files = cursor.fetchall()
-                
-                # Update job progress immediately after classifying files
-                processed_files_count = len(matching_files)
-                try:
-                    cursor.execute('''
-                    UPDATE processing_jobs 
-                    SET total_files = %s, processed_files = %s 
-                    WHERE job_id = %s
-                    ''', (total_files, processed_files, job_id))
-                    conn.commit()
-                    logger.info(f"Updated job progress: {processed_files}/{total_files} files")
-                except Exception as e:
-                    logger.error(f"Error updating job progress after classification: {str(e)}")
-                    # Try to reconnect if the connection was closed
-                    try:
-                        conn.close()
-                    except:
-                        pass
-                    conn = get_db_connection()
-                    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-                
-                for file_id, file_path, file_name in matching_files:
-                    try:
-                        processed_files += 1
-                        
-                        # Read file
-                        with open(file_path, 'rb') as f:
-                            file_data = f.read()
-                        
-                        # Get file extension
-                        _, ext = os.path.splitext(file_path)
-                        file_type = {
-                            '.pdf': 'application/pdf',
-                            '.jpg': 'image/jpeg',
-                            '.jpeg': 'image/jpeg',
-                            '.png': 'image/png',
-                            '.tiff': 'image/tiff',
-                            '.tif': 'image/tiff'
-                        }.get(ext.lower(), 'application/octet-stream')
-                        
-                        # Perform OCR
-                        ocr_result = DocumentProcessor.perform_ocr(file_data, file_type)
-
-                        logger.info(f"ocr_result->{ocr_result}")
-                        
-                        # Extract fields
-                        extraction_result = DocumentProcessor.extract_fields(ocr_result["text"], dominant_doc_type)
-
-                        logger.info(f"extraction_result->{extraction_result}")
-
-                        
-                        # Store extracted fields
-                        for field in extraction_result.get("extracted_fields", []):
-                            field_name = field["field_name"]
-                            value = field.get("value", "")
-                            confidence = field.get("confidence", 0.0)
-                            reason = field.get("reason", "")
-                            
-                            cursor.execute('''
-                            INSERT INTO extracted_fields 
-                            (job_id, file_id, field_name, field_value, confidence, reason)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                            ''', (job_id, file_id, field_name, value, confidence, reason))
-                            
-                            # Add to folder results
-                            folder_results[folder_name].append({
-                                "filepath": file_path,
-                                "field_name": field_name,
-                                "value": value,
-                                "confidence": confidence,
-                                "reason": reason
-                            })
-                        
-                        # Update file status
-                        cursor.execute('''
-                        UPDATE processed_files 
-                        SET processing_status = 'processed' 
-                        WHERE id = %s
-                        ''', (file_id,))
-                        
-                        conn.commit()
-                        
-                    except Exception as e:
-                        logger.error(f"Error extracting fields from {file_path}: {str(e)}")
-                        # Update file status
-                        cursor.execute('''
-                        UPDATE processed_files 
-                        SET processing_status = 'error', error_message = %s 
-                        WHERE id = %s
-                        ''', (str(e), file_id))
-                        conn.commit()
-                
-                # Mark files of other types as skipped but also include them in the results
-                cursor.execute('''
-                SELECT id, file_path, file_name, document_type FROM processed_files 
-                WHERE job_id = %s AND folder_name = %s AND document_type != %s AND processing_status = 'classified'
-                ''', (job_id, folder_name, dominant_doc_type))
-                
-                non_matching_files = cursor.fetchall()
-                
-                for file_id, file_path, file_name, doc_type in non_matching_files:
-                    try:
-                        # Update file status
-                        cursor.execute('''
-                        UPDATE processed_files 
-                        SET processing_status = 'skipped', error_message = 'Document type does not match dominant type in folder'
-                        WHERE id = %s
-                        ''', (file_id,))
-                        conn.commit()
-                        
-                        # Add to folder results with reason
-                        folder_results[folder_name].append({
-                            "filepath": file_path,
-                            "document_type": doc_type,
-                            "dominant_type": dominant_doc_type,
-                            "processing_status": "skipped",
-                            "reason": f"Document type '{doc_type}' does not match dominant type '{dominant_doc_type}' in folder"
-                        })
-                        
-                    except Exception as e:
-                        logger.error(f"Error marking non-matching file {file_path}: {str(e)}")
-
                 
                 # Update job progress
                 try:
@@ -789,7 +928,7 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                     ''', (total_files, processed_files, job_id))
                     conn.commit()
         
-        # Generate Excel report
+        # Generate Excel report (unchanged from original code)
         excel_path = os.path.join(output_dir, f"extraction_results_{job_id}.xlsx")
         with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
             # Track all skipped documents for a separate sheet
@@ -1087,7 +1226,7 @@ async def upload_files(
             ''', (job_id, "processing", datetime.now(), 0, 0))
             conn.commit()
         except Exception as e:
-            # Handle column issues as in your original code
+            # Handle column issues
             if "column \"error_message\" of relation \"processing_jobs\" does not exist" in str(e):
                 # Add the missing column
                 logger.info("Adding missing error_message column to processing_jobs table")
@@ -1162,7 +1301,7 @@ async def upload_files(
         return {
             "status": "processing",
             "job_id": job_id,
-            "message": "Files uploaded successfully. Processing started.",
+            "message": "Files uploaded successfully. Processing started with Gemini's multimodal capabilities.",
             "files": file_names
         }
         
@@ -1171,7 +1310,7 @@ async def upload_files(
     except Exception as e:
         logger.error(f"Error in upload endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-    
+     
 @app.get("/status/{job_id}")
 async def get_job_status(job_id: str):
     """Get the status of a processing job."""
@@ -1264,6 +1403,62 @@ async def download_results(job_id: str):
         raise
     except Exception as e:
         logger.error(f"Error downloading results: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+# Add this endpoint to your FastAPI app.py file
+
+@app.get("/stats")
+async def get_stats():
+    """Get aggregate statistics for the dashboard."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=DictCursor)
+        
+        # Get job stats
+        cursor.execute('''
+        SELECT status, COUNT(*) as count 
+        FROM processing_jobs 
+        GROUP BY status
+        ''')
+        job_stats = {row["status"]: row["count"] for row in cursor.fetchall()}
+        
+        # Get file stats
+        cursor.execute('''
+        SELECT 
+            SUM(CASE WHEN document_type != 'unknown' THEN 1 ELSE 0 END) as recognized,
+            COUNT(*) as total
+        FROM processed_files
+        ''')
+        file_stats = cursor.fetchone()
+        
+        # Get processing times
+        cursor.execute('''
+        SELECT job_id, start_time, end_time
+        FROM processing_jobs
+        WHERE status = 'completed'
+        ORDER BY end_time DESC
+        LIMIT 10
+        ''')
+        processing_times = []
+        for row in cursor.fetchall():
+            if row["start_time"] and row["end_time"]:
+                duration = (row["end_time"] - row["start_time"]).total_seconds()
+                processing_times.append({
+                    "job_id": row["job_id"],
+                    "duration": duration
+                })
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "jobs": job_stats,
+            "files": file_stats,
+            "processing_times": processing_times
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching statistics: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/health")
