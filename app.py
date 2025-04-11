@@ -31,6 +31,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Adjust logging configuration to ensure detailed logging
+def configure_enhanced_logging():
+    """Configure logging to capture more detailed information."""
+    # Set up a more detailed logging format
+    logging.basicConfig(
+        level=logging.DEBUG,  # Change to DEBUG to see more details
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # You might want to adjust logging for certain noisy libraries
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('google.auth').setLevel(logging.WARNING)
+
+# Call this at the start of your application
+configure_enhanced_logging()
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Document Processing API",
@@ -140,274 +157,7 @@ for field in FIELDS:
 
 class DocumentProcessor:
     """Helper class for document processing operations using Vertex AI's multimodal capabilities"""
-    
-    @staticmethod
-    def perform_ocr(file_data: bytes, file_type: str) -> Dict[str, Any]:
-        """Process documents using Vertex AI's multimodal capabilities."""
-        try:
-            result = {"text": "", "pages": []}
-            
-            # Initialize Vertex AI model
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)
-            
-            if file_type.lower() in ["image/jpeg", "image/jpg", "image/png", "image/tiff"]:
-                # Process image directly with Vertex AI
-                response = model.generate_content(
-                    [
-                        "Extract all text from this document image. Return only the extracted text without additional comments.",
-                        {"mime_type": file_type, "data": file_data}
-                    ]
-                )
-                text = response.text.strip()
-                result["text"] = text
-                result["pages"].append({"page_num": 1, "text": text})
-                
-            elif file_type.lower() in ["application/pdf", "pdf"]:
-                # Convert PDF to images and process each page with Vertex AI
-                images = convert_from_bytes(file_data)
-                full_text = ""
-                
-                for i, image in enumerate(images):
-                    # Convert PIL image to bytes
-                    img_byte_arr = io.BytesIO()
-                    image.save(img_byte_arr, format="PNG")
-                    img_bytes = img_byte_arr.getvalue()
-                    
-                    # Process with Vertex AI
-                    response = model.generate_content(
-                        [
-                            "Extract all text from this document image. Return only the extracted text without additional comments.",
-                            {"mime_type": "image/png", "data": img_bytes}
-                        ]
-                    )
-                    page_text = response.text.strip()
-                    full_text += page_text + "\n\n"
-                    result["pages"].append({"page_num": i+1, "text": page_text})
-                
-                result["text"] = full_text
-                
-            else:
-                logger.warning(f"Unsupported file type for Vertex AI processing: {file_type}")
-                result["text"] = "Unsupported file type for processing"
-                result["error"] = f"Unsupported file type: {file_type}"
-                
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error during Vertex AI document processing: {str(e)}")
-            return {"error": str(e), "text": "", "pages": []}
-    
-    @staticmethod
-    def classify_document(text: str) -> Dict[str, Any]:
-        """Classify the document type using Vertex AI."""
-        try:
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)
-            
-            prompt = """
-            You are a document classification expert. Examine the following text extracted from a document and determine which type of financial document it is.
-            
-            Classify the document into EXACTLY ONE of these categories:
-            - customer_request_letter
-            - form_15ca
-            - form_15cb
-            - form_a2
-            - invoice
-            - transport_document
-            - fdd_stationery
-            - unknown
-            
-            Look for specific headers, formatting patterns, and content that uniquely identify each document type:
-            
-            ### Customer Request Letter
-            - Typically contains: "Request for remittance", "Outward remittance", or similar phrases
-            - Usually has beneficiary details, bank details, and remittance amount
-            - Often contains a formal request structure with date and signature
-            
-            ### Form 15CA
-            - Official Indian tax form for foreign remittances
-            - Contains "FORM 15CA" in the header
-            - Has sections related to Income Tax Act and remittance declarations
-            - Contains an acknowledgment number
-            
-            ### Form 15CB
-            - Certificate from Chartered Accountant related to foreign remittances
-            - Contains "FORM 15CB" in the header
-            - Has CA certification and registration numbers
-            
-            ### Form A2
-            - Foreign exchange transaction form
-            - Contains "FORM A2" in the header
-            - Has sections for purpose codes and forex transaction details
-            
-            ### Invoice
-            - May have a Header mentioning Invoice
-            - Contains line items with quantities, unit prices, and totals
-            - Has invoice number, date, and payment terms
-            - Lists buyer and seller information
-            
-            ### Transport Document
-            - Bill of Lading (B/L), Airway Bill, or similar
-            - Contains shipping details, ports, vessel information
-            - Has consignor and consignee information
-            
-            ### FDD Stationery
-            - Foreign Demand Draft document
-            - Contains DD number and banking instrument details
-            
-            Provide your classification as a simple JSON with two fields:
-            {
-                "document_type": "one of the categories listed above",
-                "confidence": 0.XX (a number between 0 and 1)
-            }
-            
-            Return ONLY this JSON with no explanations or additional text.
-            """
-            
-            classification_response = model.generate_content([prompt, text])
-            json_str = classification_response.text.strip()
-            
-            # Clean up potential JSON formatting
-            if json_str.startswith("```json"):
-                json_str = json_str[7:]
-            if json_str.endswith("```"):
-                json_str = json_str[:-3]
-                
-            classification = json.loads(json_str.strip())
-            return classification
-            
-        except Exception as e:
-            logger.error(f"Error during document classification: {str(e)}")
-            return {"document_type": "unknown", "confidence": 0.0, "error": str(e)}
-    
-    @staticmethod
-    def extract_fields(text: str, document_type: str) -> Dict[str, Any]:
-        """Extract fields from document using Vertex AI."""
-        try:
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)       
-            
-            # Get fields for this document type
-            doc_fields = DOCUMENT_FIELDS.get(document_type, [])
-            if not doc_fields:
-                return {
-                    "extracted_fields": [],
-                    "metadata": {
-                        "analysis_timestamp": datetime.now().isoformat(),
-                        "overall_confidence": 0.0,
-                        "error": f"No fields defined for document type: {document_type}"
-                    }
-                }
-            
-            # Define field descriptions for better extraction
-            field_descriptions = {
-                "currency": "The currency for the transaction (e.g., USD, EUR, GBP)",
-                "amount": "The amount of money being transferred",
-                "beneficiary_account_number": "The bank account number of the recipient",
-                "beneficiary_name": "The name of the person or entity receiving the funds",
-                "beneficiary_address": "The address of the beneficiary",
-                "beneficiary_bank_swift_code": "The SWIFT/BIC code of the beneficiary's bank",
-                "beneficiary_bank_name": "The name of the beneficiary's bank",
-                "beneficiary_bank_address": "The address of the beneficiary's bank",
-                "charge_type": "The type of charges for the transaction (OUR, BEN, SHA)",
-                "dd_number": "The Demand Draft number printed on the FDD stationery",
-                "intermediary_institution": "Any intermediary bank involved in the transaction",
-                "ack_no_form_15ca": "The acknowledgment number on Form 15CA",
-                "ack_no_form_15cb": "The acknowledgment number on Form 15CB",
-                "account_to_be_debited_for_remittance": "The account from which the main amount will be taken",
-                "account_to_be_debited_for_charges": "The account from which the fees will be taken",
-                "remittance_account": "The account for the remittance",
-                "invoice_number": "The identification number of the invoice",
-                "invoice_date": "The date when the invoice was issued",
-                "transport_document_number": "The number on the transport document",
-                "transport_document_date": "The date on the transport document",
-                "port_of_loading": "The port where goods were loaded",
-                "port_of_discharge": "The port where goods will be unloaded",
-                "on_board_date": "The date when goods were loaded on vessel",
-                "remittance_information": "Details about the purpose of the remittance",
-                "purpose_code": "The code indicating the purpose of the foreign exchange transaction",
-                "form_15ca": "Details from the Form 15CA document",
-                "customer_request_letter_date": "The date on the customer request letter",
-                "payment_reference_drawer": "Reference information for the payment drawer",
-                "goods_description": "Description of the goods on the invoice",
-                "inco_terms": "International Commercial Terms on the invoice (e.g., FOB, CIF)",
-                "goods_carrier": "The carrier/vessel transporting the goods",
-                "goods_shipment_date": "The date when goods were shipped",
-                "bullion": "Whether the invoice is for bullion (yes/no)",
-                "bullion_customer": "The customer for bullion transaction",
-                "bullion_delivery": "Delivery details for bullion",
-                "bullion_weight": "Weight of bullion being transacted"
-            }
-            
-            # Create field list with descriptions
-            fields_with_descriptions = []
-            for field in doc_fields:
-                description = field_descriptions.get(field, "")
-                fields_with_descriptions.append(f"- {field}: {description}")
-            
-            fields_list = "\n".join(fields_with_descriptions)
-            
-            prompt = f"""
-            You are a specialized financial document analyzer with expertise in extracting information from {document_type.replace("_", " ").title()} documents.
-            
-            Extract the following fields from the document with maximum precision:
-            {fields_list}
-            
-            For each field:
-            1. Extract the exact value as it appears in the document
-            2. If the text is unclear, make a reasonable approximation
-            3. For dates, standardize to YYYY-MM-DD format where possible
-            4. For monetary amounts, include both value and currency
-            5. Assign a confidence score between 0.0 and 1.0 for each extraction
-            6. If a field cannot be found or extracted, provide a reason why
-            
-            For each field, provide:
-            - The extracted value
-            - A confidence score (0.0-1.0)
-            - The exact text segment from which you extracted the information
-            - A reason if the field couldn't be extracted
-            
-            Provide your analysis in the following strict JSON structure only:
-            {{
-                "extracted_fields": [
-                    {{
-                        "field_name": "field_name",
-                        "value": "extracted value",
-                        "confidence": 0.XX,
-                        "source_text": "text from document",
-                        "reason": "reason if field couldn't be extracted properly"
-                    }}
-                ],
-                "metadata": {{
-                    "analysis_timestamp": "ISO timestamp",
-                    "overall_confidence": 0.XX
-                }}
-            }}
-            
-            Return ONLY valid JSON with no explanations or additional text.
-            """
-            
-            extraction_response = model.generate_content([prompt, text])
-            json_str = extraction_response.text.strip()
-            
-            # Clean up potential JSON formatting
-            if json_str.startswith("```json"):
-                json_str = json_str[7:]
-            if json_str.endswith("```"):
-                json_str = json_str[:-3]
-                
-            extraction_result = json.loads(json_str.strip())
-            return extraction_result
-            
-        except Exception as e:
-            logger.error(f"Error during field extraction: {str(e)}")
-            return {
-                "extracted_fields": [],
-                "metadata": {
-                    "analysis_timestamp": datetime.now().isoformat(),
-                    "overall_confidence": 0.0,
-                    "error": str(e)
-                }
-            }
-            
+                  
     @staticmethod
     def process_multimodal_document(file_data: bytes, file_type: str) -> Dict[str, Any]:
         """Process a document using Vertex AI's multimodal capabilities."""
@@ -424,7 +174,7 @@ class DocumentProcessor:
             if file_type.lower() in ["image/jpeg", "image/jpg", "image/png", "image/tiff"]:
                 # First, classify the document type using the image directly
                 classification_prompt = """
-                You are a document classification expert. Examine this document image and determine which type of financial document it is.
+                You are a document classification expert. Examine the following text extracted from a document and determine which type of financial document it is.
                 
                 Classify the document into EXACTLY ONE of these categories:
                 - customer_request_letter
@@ -436,8 +186,51 @@ class DocumentProcessor:
                 - fdd_stationery
                 - unknown
                 
-                Return ONLY a JSON with the document_type and confidence, like:
-                {"document_type": "category_name", "confidence": 0.X}
+                Look for specific headers, formatting patterns, and content that uniquely identify each document type:
+                
+                ### Customer Request Letter
+                - Typically contains: "Request for remittance", "Outward remittance", or similar phrases
+                - Usually has beneficiary details, bank details, and remittance amount
+                - Often contains a formal request structure with date and signature
+                
+                ### Form 15CA
+                - Official Indian tax form for foreign remittances
+                - Contains "FORM 15CA" in the header
+                - Has sections related to Income Tax Act and remittance declarations
+                - Contains an acknowledgment number
+                
+                ### Form 15CB
+                - Certificate from Chartered Accountant related to foreign remittances
+                - Contains "FORM 15CB" in the header
+                - Has CA certification and registration numbers
+                
+                ### Form A2
+                - Foreign exchange transaction form
+                - Contains "FORM A2" in the header
+                - Has sections for purpose codes and forex transaction details
+                
+                ### Invoice
+                - May have a Header mentioning Invoice
+                - Contains line items with quantities, unit prices, and totals
+                - Has invoice number, date, and payment terms
+                - Lists buyer and seller information
+                
+                ### Transport Document
+                - Bill of Lading (B/L), Airway Bill, or similar
+                - Contains shipping details, ports, vessel information
+                - Has consignor and consignee information
+                
+                ### FDD Stationery
+                - Foreign Demand Draft document
+                - Contains DD number and banking instrument details
+                
+                Provide your classification as a simple JSON with two fields:
+                {
+                    "document_type": "one of the categories listed above",
+                    "confidence": 0.XX (a number between 0 and 1)
+                }
+                
+                Return ONLY this JSON with no explanations or additional text.
                 """
                 
                 classification_response = model.generate_content([
@@ -446,27 +239,102 @@ class DocumentProcessor:
                 ])
                 
                 json_str = classification_response.text.strip()
-                if json_str.startswith("```json"):
-                    json_str = json_str[7:]
-                if json_str.endswith("```"):
-                    json_str = json_str[:-3]
-                    
-                classification = json.loads(json_str.strip())
-                document_type = classification["document_type"]
-                confidence = classification["confidence"]
+                logger.info(f"Raw classification response: {json_str}")
+                
+                # Clean up the JSON string to handle markdown code blocks and any text before/after
+                json_str = DocumentProcessor._extract_json_from_text(json_str)
+                
+                try:
+                    classification = json.loads(json_str)
+                    document_type = classification.get("document_type", "unknown")
+                    confidence = classification.get("confidence", 0.0)
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON parsing error in classification: {e}, Raw response: {json_str}")
+                    return {
+                        "error": f"Failed to parse classification response: {str(e)}",
+                        "text": "",
+                        "pages": [],
+                        "document_type": "unknown",
+                        "confidence": 0.0,
+                        "extracted_fields": []
+                    }
                 
                 # Now extract text and fields based on the document type
                 doc_fields = DOCUMENT_FIELDS.get(document_type, [])
                 fields_str = ", ".join(doc_fields)
+
+                field_descriptions = {
+                    "currency": "The currency for the transaction (e.g., USD, EUR, GBP)",
+                    "amount": "The amount of money being transferred",
+                    "beneficiary_account_number": "The bank account number of the recipient",
+                    "beneficiary_name": "The name of the person or entity receiving the funds",
+                    "beneficiary_address": "The address of the beneficiary",
+                    "beneficiary_bank_swift_code": "The SWIFT/BIC code of the beneficiary's bank",
+                    "beneficiary_bank_name": "The name of the beneficiary's bank",
+                    "beneficiary_bank_address": "The address of the beneficiary's bank",
+                    "charge_type": "The type of charges for the transaction (OUR, BEN, SHA)",
+                    "dd_number": "The Demand Draft number printed on the FDD stationery",
+                    "intermediary_institution": "Any intermediary bank involved in the transaction",
+                    "ack_no_form_15ca": "The acknowledgment number on Form 15CA",
+                    "ack_no_form_15cb": "The acknowledgment number on Form 15CB",
+                    "account_to_be_debited_for_remittance": "The account from which the main amount will be taken",
+                    "account_to_be_debited_for_charges": "The account from which the fees will be taken",
+                    "remittance_account": "The account for the remittance",
+                    "invoice_number": "The identification number of the invoice",
+                    "invoice_date": "The date when the invoice was issued",
+                    "transport_document_number": "The number on the transport document",
+                    "transport_document_date": "The date on the transport document",
+                    "port_of_loading": "The port where goods were loaded",
+                    "port_of_discharge": "The port where goods will be unloaded",
+                    "on_board_date": "The date when goods were loaded on vessel",
+                    "remittance_information": "Details about the purpose of the remittance",
+                    "purpose_code": "The code indicating the purpose of the foreign exchange transaction",
+                    "form_15ca": "Details from the Form 15CA document",
+                    "customer_request_letter_date": "The date on the customer request letter",
+                    "payment_reference_drawer": "Reference information for the payment drawer",
+                    "goods_description": "Description of the goods on the invoice",
+                    "inco_terms": "International Commercial Terms on the invoice (e.g., FOB, CIF)",
+                    "goods_carrier": "The carrier/vessel transporting the goods",
+                    "goods_shipment_date": "The date when goods were shipped",
+                    "bullion": "Whether the invoice is for bullion (yes/no)",
+                    "bullion_customer": "The customer for bullion transaction",
+                    "bullion_delivery": "Delivery details for bullion",
+                    "bullion_weight": "Weight of bullion being transacted"
+                }
+
+                # Create field list with descriptions
+                fields_with_descriptions = []
+                for field in doc_fields:
+                    description = field_descriptions.get(field, "")
+                    fields_with_descriptions.append(f"- {field}: {description}")
                 
+                fields_list = "\n".join(fields_with_descriptions)
+  
                 extraction_prompt = f"""
-                This is a {document_type.replace('_', ' ')} document. 
-                Extract all text content AND the following fields: {fields_str}.
+                You are a specialized financial document analyzer with expertise in extracting information from {document_type.replace("_", " ").title()} documents.
+            
+                Extract the following fields from the document with maximum precision:
+                {fields_list}
                 
-                For each field, provide the value and a confidence score between 0.0 and 1.0.
+                For each field:
+                1. Extract the exact value as it appears in the document
+                2. If the text is unclear, make a reasonable approximation
+                3. For dates, standardize to YYYY-MM-DD format where possible
+                4. For monetary amounts, include both value and currency
+                5. Assign a confidence score between 0.0 and 1.0 for each extraction
+                6. If a field cannot be found or extracted, provide a reason why
+                
+                For each field, provide:
+                - The extracted value
+                - A confidence score (0.0-1.0)
+                - The exact text segment from which you extracted the information
+                - A reason if the field couldn't be extracted
+                
                 Format your response as a JSON with two parts:
                 1. "full_text": The complete text from the document
                 2. "extracted_fields": An array of objects with field_name, value, and confidence
+                
+                IMPORTANT: Your response must be a valid JSON object and NOTHING ELSE. No explanations, no markdown code blocks.
                 """
                 
                 extraction_response = model.generate_content([
@@ -475,12 +343,35 @@ class DocumentProcessor:
                 ])
                 
                 extraction_json_str = extraction_response.text.strip()
-                if extraction_json_str.startswith("```json"):
-                    extraction_json_str = extraction_json_str[7:]
-                if extraction_json_str.endswith("```"):
-                    extraction_json_str = extraction_json_str[:-3]
+                logger.info(f"Raw extraction response length: {len(extraction_json_str)}")
+                logger.info(f"First 500 chars of extraction response: {extraction_json_str[:500]}...")
                 
-                extraction_result = json.loads(extraction_json_str.strip())
+                # Clean up the JSON string to handle markdown code blocks and any text before/after
+                extraction_json_str = DocumentProcessor._extract_json_from_text(extraction_json_str)
+                
+                try:
+                    extraction_result = json.loads(extraction_json_str)
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON parsing error in extraction: {e}, Raw response preview: {extraction_json_str[:500]}...")
+                    # Try harder to extract valid JSON
+                    try:
+                        # Last resort: try to find and extract JSON object
+                        import re
+                        json_pattern = r'\{(?:[^{}]|(?:\{(?:[^{}]|(?:\{[^{}]*\}))*\}))*\}'
+                        match = re.search(json_pattern, extraction_json_str)
+                        if match:
+                            potential_json = match.group(0)
+                            extraction_result = json.loads(potential_json)
+                            logger.info("Successfully extracted JSON using regex pattern")
+                        else:
+                            raise ValueError("Could not find valid JSON pattern")
+                    except Exception as inner_e:
+                        logger.error(f"Advanced JSON extraction also failed: {inner_e}")
+                        # Provide fallback extraction result
+                        extraction_result = {
+                            "full_text": "Failed to extract text due to JSON parsing error",
+                            "extracted_fields": []
+                        }
                 
                 # Combine the results
                 result = {
@@ -490,106 +381,7 @@ class DocumentProcessor:
                     "extracted_fields": extraction_result.get("extracted_fields", []),
                     "pages": [{"page_num": 1, "text": extraction_result.get("full_text", "")}]
                 }
-                
-            elif file_type.lower() in ["application/pdf", "pdf"]:
-                # For PDFs, we still need to convert to images and process page by page
-                images = convert_from_bytes(file_data)
-                full_text = ""
-                all_fields = []
-                document_type_votes = {}
-                
-                for i, image in enumerate(images):
-                    # Convert PIL image to bytes
-                    img_byte_arr = io.BytesIO()
-                    image.save(img_byte_arr, format="PNG")
-                    img_bytes = img_byte_arr.getvalue()
-                    
-                    # Create Vertex AI Part for this image
-                    page_part = Part.from_data(data=img_bytes, mime_type="image/png")
-                    
-                    # If it's the first page, classify the document
-                    if i == 0:
-                        classification_prompt = """
-                        You are a document classification expert. Examine this document image and determine which type of financial document it is.
-                        
-                        Classify the document into EXACTLY ONE of these categories:
-                        - customer_request_letter
-                        - form_15ca
-                        - form_15cb
-                        - form_a2
-                        - invoice
-                        - transport_document
-                        - fdd_stationery
-                        - unknown
-                        
-                        Return ONLY a JSON with the document_type and confidence, like:
-                        {"document_type": "category_name", "confidence": 0.X}
-                        """
-                        
-                        classification_response = model.generate_content([
-                            classification_prompt,
-                            page_part
-                        ])
-                        
-                        json_str = classification_response.text.strip()
-                        if json_str.startswith("```json"):
-                            json_str = json_str[7:]
-                        if json_str.endswith("```"):
-                            json_str = json_str[:-3]
-                            
-                        classification = json.loads(json_str.strip())
-                        document_type = classification["document_type"]
-                        document_type_votes[document_type] = classification["confidence"]
-                    
-                    # Extract text from each page
-                    text_prompt = "Extract all text from this document image. Return only the extracted text."
-                    text_response = model.generate_content([
-                        text_prompt,
-                        page_part
-                    ])
-                    page_text = text_response.text.strip()
-                    full_text += page_text + "\n\n"
-                    
-                # Determine final document type (use the one with highest confidence)
-                document_type = max(document_type_votes.items(), key=lambda x: x[1])[0] if document_type_votes else "unknown"
-                confidence = document_type_votes.get(document_type, 0.0)
-                
-                # Now extract fields based on the document type and the full text
-                doc_fields = DOCUMENT_FIELDS.get(document_type, [])
-                if doc_fields and full_text:
-                    fields_str = ", ".join(doc_fields)
-                    
-                    extraction_prompt = f"""
-                    This is a {document_type.replace('_', ' ')} document with the following text:
-                    
-                    {full_text[:4000]}  # Limit text if too long
-                    
-                    Extract the following fields: {fields_str}.
-                    
-                    For each field, provide the value and a confidence score between 0.0 and 1.0.
-                    Format your response as a JSON with an array of extracted_fields objects with field_name, value, and confidence.
-                    """
-                    
-                    extraction_response = model.generate_content(extraction_prompt)
-                    
-                    extraction_json_str = extraction_response.text.strip()
-                    if extraction_json_str.startswith("```json"):
-                        extraction_json_str = extraction_json_str[7:]
-                    if extraction_json_str.endswith("```"):
-                        extraction_json_str = extraction_json_str[:-3]
-                    
-                    extraction_result = json.loads(extraction_json_str.strip())
-                    all_fields = extraction_result.get("extracted_fields", [])
-                
-                # Combine the results
-                result = {
-                    "document_type": document_type,
-                    "confidence": confidence,
-                    "text": full_text,
-                    "extracted_fields": all_fields,
-                    "pages": [{"page_num": i+1, "text": page_text} for i, page_text in enumerate(full_text.split("\n\n"))]
-                }
-                
+                             
             else:
                 logger.warning(f"Unsupported file type for Vertex AI processing: {file_type}")
                 result = {
@@ -605,6 +397,7 @@ class DocumentProcessor:
             
         except Exception as e:
             logger.error(f"Error during multimodal document processing: {str(e)}")
+            logger.error(traceback.format_exc())  # Log full traceback for better debugging
             return {
                 "error": str(e),
                 "text": "",
@@ -613,6 +406,36 @@ class DocumentProcessor:
                 "confidence": 0.0,
                 "extracted_fields": []
             }
+    
+    @staticmethod
+    def _extract_json_from_text(text: str) -> str:
+        """
+        Extract valid JSON from potentially messy text that might contain
+        markdown code blocks, explanations, etc.
+        """
+        # Step 1: Remove markdown code blocks if present
+        if "```json" in text:
+            # Extract content between ```json and ``` markers
+            import re
+            json_pattern = r'```json\s*([\s\S]*?)\s*```'
+            matches = re.findall(json_pattern, text)
+            if matches:
+                return matches[0].strip()
+        
+        # Step 2: If no markdown blocks, try to find the first { and last }
+        if '{' in text and '}' in text:
+            start_idx = text.find('{')
+            end_idx = text.rfind('}') + 1
+            if start_idx < end_idx:
+                return text[start_idx:end_idx].strip()
+        
+        # Step 3: If all else fails, return the input text after removing common non-JSON elements
+        # Remove common explanatory text patterns
+        clean_text = re.sub(r'^.*?(?=\{)', '', text, flags=re.DOTALL)  # Remove everything before first {
+        clean_text = re.sub(r'(?<=\}).*$', '', clean_text, flags=re.DOTALL)  # Remove everything after last }
+        
+        return clean_text.strip()
+    
 def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id: str):
     """Process multiple zip files and generate Excel report using Gemini's multimodal capabilities."""
 
