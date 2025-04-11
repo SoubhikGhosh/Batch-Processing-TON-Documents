@@ -1,8 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import vertexai
-from vertexai.generative_models import GenerativeModel, SafetySetting
+import google.generativeai as genai
 import os
 import zipfile
 import io
@@ -11,6 +10,9 @@ import tempfile
 import time
 from typing import List, Dict, Any, Optional, Set
 import pandas as pd
+import psycopg2
+from psycopg2.extras import Json, DictCursor
+from datetime import datetime
 import uuid
 import shutil
 import json
@@ -20,8 +22,6 @@ from PIL import Image
 import re
 import uvicorn
 from collections import Counter
-import concurrent.futures
-import traceback
 
 # Configure logging
 logging.basicConfig(
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(
     title="Document Processing API",
-    description="API for processing zip files containing different document types using Vertex AI",
+    description="API for processing zip files containing different document types using OCR and Gemini",
     version="1.0.0"
 )
 
@@ -47,29 +47,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Vertex AI Configuration
-project = "hbl-uat-ocr-fw-app-prj-spk-4d"
-vertexai.init(project=project, location="asia-south1", api_endpoint='asia-south1-aiplatform.googleapis.com')
+# Database configuration
+DB_CONFIG = {
+    'dbname': 'batch_document_processing',
+    'user': 'soubhikghosh',  # Replace with your username
+    'password': '99Ghosh',  # Replace with your password
+    'host': 'localhost',
+    'port': '5432'
+}
 
-# Safety settings
-safety_settings = [
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-]
+# Configure Google API - replace with your API key
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyD2ArK74wBtL1ufYmpyrV2LqaOBrSi3mlU")
+genai.configure(api_key=GOOGLE_API_KEY)
 
 # Document types
 DOCUMENT_TYPES = [
@@ -123,12 +112,14 @@ FIELDS = [
 ]
 
 
+import concurrent.futures
+import traceback
+
 # Create a thread pool executor at the module level
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 # Keep a dictionary of futures for tracking
 active_tasks = {}
-processed_jobs = {}
 
 # Create a mapping of document types to their fields
 DOCUMENT_FIELDS = {}
@@ -139,19 +130,19 @@ for field in FIELDS:
     DOCUMENT_FIELDS[doc_type].append(field["name"])
 
 class DocumentProcessor:
-    """Helper class for document processing operations using Vertex AI's multimodal capabilities"""
+    """Helper class for document processing operations using Gemini's multimodal capabilities"""
     
     @staticmethod
     def perform_ocr(file_data: bytes, file_type: str) -> Dict[str, Any]:
-        """Process documents using Vertex AI's multimodal capabilities."""
+        """Process documents using Gemini's multimodal capabilities instead of Tesseract OCR."""
         try:
             result = {"text": "", "pages": []}
             
-            # Initialize Vertex AI model
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)
+            # Initialize Gemini model with multimodal capabilities
+            model = genai.GenerativeModel("gemini-1.5-flash")
             
             if file_type.lower() in ["image/jpeg", "image/jpg", "image/png", "image/tiff"]:
-                # Process image directly with Vertex AI
+                # Process image directly with Gemini
                 response = model.generate_content(
                     [
                         "Extract all text from this document image. Return only the extracted text without additional comments.",
@@ -163,7 +154,7 @@ class DocumentProcessor:
                 result["pages"].append({"page_num": 1, "text": text})
                 
             elif file_type.lower() in ["application/pdf", "pdf"]:
-                # Convert PDF to images and process each page with Vertex AI
+                # Convert PDF to images and process each page with Gemini
                 images = convert_from_bytes(file_data)
                 full_text = ""
                 
@@ -173,7 +164,7 @@ class DocumentProcessor:
                     image.save(img_byte_arr, format="PNG")
                     img_bytes = img_byte_arr.getvalue()
                     
-                    # Process with Vertex AI
+                    # Process with Gemini
                     response = model.generate_content(
                         [
                             "Extract all text from this document image. Return only the extracted text without additional comments.",
@@ -187,21 +178,21 @@ class DocumentProcessor:
                 result["text"] = full_text
                 
             else:
-                logger.warning(f"Unsupported file type for Vertex AI processing: {file_type}")
+                logger.warning(f"Unsupported file type for Gemini processing: {file_type}")
                 result["text"] = "Unsupported file type for processing"
                 result["error"] = f"Unsupported file type: {file_type}"
                 
             return result
             
         except Exception as e:
-            logger.error(f"Error during Vertex AI document processing: {str(e)}")
+            logger.error(f"Error during Gemini document processing: {str(e)}")
             return {"error": str(e), "text": "", "pages": []}
     
     @staticmethod
     def classify_document(text: str) -> Dict[str, Any]:
-        """Classify the document type using Vertex AI."""
+        """Classify the document type using Gemini AI."""
         try:
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)
+            model = genai.GenerativeModel("gemini-1.5-flash")
             
             prompt = """
             You are a document classification expert. Examine the following text extracted from a document and determine which type of financial document it is.
@@ -281,9 +272,9 @@ class DocumentProcessor:
     
     @staticmethod
     def extract_fields(text: str, document_type: str) -> Dict[str, Any]:
-        """Extract fields from document using Vertex AI."""
+        """Extract fields from document using Gemini AI."""
         try:
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)       
+            model = genai.GenerativeModel("gemini-1.5-flash")
             
             # Get fields for this document type
             doc_fields = DOCUMENT_FIELDS.get(document_type, [])
@@ -410,11 +401,10 @@ class DocumentProcessor:
             
     @staticmethod
     def process_multimodal_document(file_data: bytes, file_type: str) -> Dict[str, Any]:
-        """Process a document using Vertex AI's multimodal capabilities."""
+        """Process a document using Gemini's multimodal capabilities for both classification and extraction."""
         try:
-            # Initialize Vertex AI model
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)
-            
+            # Initialize Gemini model with multimodal capabilities
+            model = genai.GenerativeModel("gemini-1.5-flash")
             result = {}
             
             # For images, process directly
@@ -607,17 +597,107 @@ class DocumentProcessor:
                 "confidence": 0.0,
                 "extracted_fields": []
             }
-            
-        except Exception as e:
-            logger.error(f"Error during multimodal document processing: {str(e)}")
-            return {
-                "error": str(e),
-                "text": "",
-                "pages": [],
-                "document_type": "unknown",
-                "confidence": 0.0,
-                "extracted_fields": []
-            }
+        
+def get_db_connection():
+    """Create the database if it doesn't exist and return a connection."""
+    try:
+        # First try to connect to the default postgres database to check if our database exists
+        conn = psycopg2.connect(
+            dbname='postgres',
+            user=DB_CONFIG['user'],
+            password=DB_CONFIG['password'],
+            host=DB_CONFIG['host'],
+            port=DB_CONFIG['port']
+        )
+        conn.autocommit = True
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Check if our database exists
+        cursor.execute("SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s", (DB_CONFIG['dbname'],))
+        exists = cursor.fetchone()
+        
+        # Create database if it doesn't exist
+        if not exists:
+            logger.info(f"Database '{DB_CONFIG['dbname']}' does not exist. Creating...")
+            cursor.execute(f"CREATE DATABASE {DB_CONFIG['dbname']}")
+            logger.info(f"Database '{DB_CONFIG['dbname']}' created successfully")
+        
+        cursor.close()
+        conn.close()
+        
+        # Now connect to our actual database
+        conn = psycopg2.connect(**DB_CONFIG)
+        logger.info(f"Connected to database '{DB_CONFIG['dbname']}'")
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {str(e)}")
+        raise
+
+def init_db():
+    """Initialize database tables if they don't exist."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Create processed_files table to track uploaded files
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS processed_files (
+            id SERIAL PRIMARY KEY,
+            job_id TEXT,
+            file_name TEXT,
+            folder_name TEXT,
+            file_path TEXT,
+            document_type TEXT,
+            confidence FLOAT,
+            processing_status TEXT,
+            error_message TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+        ''')
+        
+        # Create extracted_fields table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS extracted_fields (
+            id SERIAL PRIMARY KEY,
+            job_id TEXT,
+            file_id INTEGER REFERENCES processed_files(id),
+            field_name TEXT,
+            field_value TEXT,
+            confidence FLOAT,
+            reason TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+        ''')
+        
+        # Create processing_jobs table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS processing_jobs (
+            id SERIAL PRIMARY KEY,
+            job_id TEXT UNIQUE,
+            status TEXT,
+            start_time TIMESTAMP,
+            end_time TIMESTAMP,
+            total_files INTEGER,
+            processed_files INTEGER,
+            output_file_path TEXT,
+            error_message TEXT
+        )
+        ''')
+        
+        # Create indexes for faster queries
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_processed_files_job_id ON processed_files(job_id);
+        CREATE INDEX IF NOT EXISTS idx_extracted_fields_job_id ON extracted_fields(job_id);
+        CREATE INDEX IF NOT EXISTS idx_extracted_fields_file_id ON extracted_fields(file_id);
+        ''')
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info("Database tables initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization error: {str(e)}")
+        raise
 
 def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id: str):
     """Process multiple zip files and generate Excel report using Gemini's multimodal capabilities."""
@@ -631,6 +711,10 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
         temp_dir = tempfile.mkdtemp(prefix=f"job_{job_id}_")
         output_dir = os.path.join(temp_dir, "output")
         os.makedirs(output_dir, exist_ok=True)
+        
+        # Create a new database connection here
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         
         # Dictionary to store results for each folder
         folder_results = {}
@@ -699,6 +783,7 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                             file_data = f.read()
                         
                         # Process document with Gemini's multimodal capabilities
+                        # Use the new multimodal processing method that does both classification and extraction
                         result = DocumentProcessor.process_multimodal_document(file_data, file_type)
                         
                         # Extract results
@@ -708,54 +793,175 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                         # Count document types
                         if doc_type != "unknown":
                             document_counts[doc_type] += 1
-                        
-                        # Create a unique file ID for tracking
-                        file_info = {
-                            "id": str(uuid.uuid4()),
-                            "job_id": job_id,
-                            "file_name": file, 
-                            "folder_name": folder_name, 
-                            "file_path": file_path, 
-                            "document_type": doc_type, 
-                            "confidence": confidence, 
-                            "processing_status": "processed"
-                        }
+                            
+                        # Store file info in database
+                        cursor.execute('''
+                        INSERT INTO processed_files 
+                        (job_id, file_name, folder_name, file_path, document_type, confidence, processing_status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        ''', (
+                            job_id, 
+                            file, 
+                            folder_name, 
+                            file_path, 
+                            doc_type, 
+                            confidence, 
+                            "processed"  # Mark as processed immediately since we already extracted fields
+                        ))
+                        file_id = cursor.fetchone()[0]
                         
                         # Store extracted fields
-                        file_info["extracted_fields"] = []
                         for field in result.get("extracted_fields", []):
-                            field_info = {
-                                "field_name": field.get("field_name", ""),
-                                "value": field.get("value", ""),
-                                "confidence": field.get("confidence", 0.0),
-                                "reason": field.get("reason", "")
-                            }
-                            file_info["extracted_fields"].append(field_info)
+                            field_name = field.get("field_name", "")
+                            value = field.get("value", "")
+                            field_confidence = field.get("confidence", 0.0)
+                            reason = field.get("reason", "")
+                            
+                            cursor.execute('''
+                            INSERT INTO extracted_fields 
+                            (job_id, file_id, field_name, field_value, confidence, reason)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ''', (job_id, file_id, field_name, value, field_confidence, reason))
                             
                             # Add to folder results
                             folder_results[folder_name].append({
                                 "filepath": file_path,
-                                "field_name": field_info["field_name"],
-                                "value": field_info["value"],
-                                "confidence": field_info["confidence"],
-                                "reason": field_info["reason"]
+                                "field_name": field_name,
+                                "value": value,
+                                "confidence": field_confidence,
+                                "reason": reason
                             })
                         
+                        # Update total count immediately after each insertion
+                        conn.commit()
                         processed_files += 1
+                        
+                        # Every 2 files, update the job status for better progress tracking
+                        if total_files % 2 == 0:
+                            cursor.execute('''
+                            UPDATE processing_jobs 
+                            SET total_files = %s, processed_files = %s 
+                            WHERE job_id = %s
+                            ''', (total_files, processed_files, job_id))
+                            conn.commit()
                         
                     except Exception as e:
                         logger.error(f"Error processing file {file_path}: {str(e)}")
+                        # Record error in database
+                        cursor.execute('''
+                        INSERT INTO processed_files 
+                        (job_id, file_name, folder_name, file_path, document_type, confidence, processing_status, error_message)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ''', (
+                            job_id, 
+                            file, 
+                            folder_name, 
+                            file_path, 
+                            "unknown", 
+                            0.0, 
+                            "error", 
+                            str(e)
+                        ))
+                        conn.commit()
                 
                 # Determine the dominant document type
                 dominant_type = document_counts.most_common(1)
                 if dominant_type:
                     dominant_doc_type = dominant_type[0][0]
                     logger.info(f"Folder {folder_name}: Dominant document type is {dominant_doc_type}")
+                    
+                    # Mark files of other types as skipped but also include them in the results
+                    cursor.execute('''
+                    SELECT id, file_path, file_name, document_type FROM processed_files 
+                    WHERE job_id = %s AND folder_name = %s AND document_type != %s AND processing_status = 'processed'
+                    ''', (job_id, folder_name, dominant_doc_type))
+                    
+                    non_matching_files = cursor.fetchall()
+                    
+                    for file_id, file_path, file_name, doc_type in non_matching_files:
+                        try:
+                            # Update file status
+                            cursor.execute('''
+                            UPDATE processed_files 
+                            SET processing_status = 'skipped', error_message = 'Document type does not match dominant type in folder'
+                            WHERE id = %s
+                            ''', (file_id,))
+                            conn.commit()
+                            
+                            # Add to folder results with reason
+                            folder_results[folder_name].append({
+                                "filepath": file_path,
+                                "document_type": doc_type,
+                                "dominant_type": dominant_doc_type,
+                                "processing_status": "skipped",
+                                "reason": f"Document type '{doc_type}' does not match dominant type '{dominant_doc_type}' in folder"
+                            })
+                            
+                        except Exception as e:
+                            logger.error(f"Error marking non-matching file {file_path}: {str(e)}")
+                else:
+                    dominant_doc_type = "unknown"
+                    logger.warning(f"Folder {folder_name}: No valid documents found")
+                
+                # Update job progress
+                try:
+                    cursor.execute('''
+                    UPDATE processing_jobs 
+                    SET total_files = %s, processed_files = %s 
+                    WHERE job_id = %s
+                    ''', (total_files, processed_files, job_id))
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Error updating job progress: {str(e)}")
+                    # Try to reconnect if the connection was closed
+                    try:
+                        conn.close()
+                    except:
+                        pass
+                    conn = get_db_connection()
+                    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                    cursor.execute('''
+                    UPDATE processing_jobs 
+                    SET total_files = %s, processed_files = %s 
+                    WHERE job_id = %s
+                    ''', (total_files, processed_files, job_id))
+                    conn.commit()
         
-        # Generate Excel report
+        # Generate Excel report (unchanged from original code)
         excel_path = os.path.join(output_dir, f"extraction_results_{job_id}.xlsx")
         with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
-            # Similar to original implementation, but using folder_results instead of database queries
+            # Track all skipped documents for a separate sheet
+            all_skipped_docs = []
+            
+            # Add all files and folders to the results if they're not already there
+            cursor.execute('''
+            SELECT pf.file_path, pf.folder_name, pf.document_type, pf.processing_status, pf.error_message
+            FROM processed_files pf
+            LEFT JOIN extracted_fields ef ON pf.id = ef.file_id
+            WHERE pf.job_id = %s AND ef.id IS NULL
+            ''', (job_id,))
+            
+            missing_files = cursor.fetchall()
+            
+            for missing_file in missing_files:
+                file_path = missing_file["file_path"]
+                folder_name = missing_file["folder_name"]
+                doc_type = missing_file["document_type"]
+                status = missing_file["processing_status"]
+                error = missing_file["error_message"]
+                
+                # Initialize folder if not exists
+                if folder_name not in folder_results:
+                    folder_results[folder_name] = []
+                
+                # Add to results
+                folder_results[folder_name].append({
+                    "filepath": file_path,
+                    "document_type": doc_type,
+                    "processing_status": status,
+                    "reason": error or "No fields extracted"
+                })
             
             for folder_name, results in folder_results.items():
                 if not results:
@@ -767,14 +973,25 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                 # Group by filepath
                 filepath_groups = {}
                 
+                # Track documents with reasons
+                folder_skipped_docs = []
+                
                 for item in results:
+                    # Check if it's a document with a reason (different type)
+                    if "processing_status" in item and item["processing_status"] in ["skipped", "error"]:
+                        # Add folder name to the item for the all_skipped sheet
+                        item["folder_name"] = folder_name
+                        folder_skipped_docs.append(item)
+                        all_skipped_docs.append(item)
+                        continue
+                        
                     filepath = item["filepath"]
                     if filepath not in filepath_groups:
                         filepath_groups[filepath] = {
                             "filepath": filepath,
                         }
                     
-                    # Add field name, value, confidence
+                    # Add field name, value, confidence, and reason
                     if "field_name" in item:
                         field_name = item["field_name"]
                         filepath_groups[filepath][field_name] = item["value"]
@@ -802,24 +1019,103 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
                     if cols:  # Only reindex if columns exist
                         df = df[cols]
                 
-                # Create a sanitized sheet name
+                # Create a sanitized sheet name (Excel has a 31 character limit for sheet names)
                 sheet_name = re.sub(r'[\\/*?[\]:]', '_', folder_name)
                 if len(sheet_name) > 31:
                     sheet_name = sheet_name[:28] + '...'
                 
+                # Create DataFrame for skipped docs in this folder
+                if folder_skipped_docs and not df.empty:
+                    df_skipped = pd.DataFrame(folder_skipped_docs)
+                    df_skipped = df_skipped[["filepath", "document_type", "reason"]]
+                    
+                    # Label section
+                    df_skipped_header = pd.DataFrame([{"filepath": "SKIPPED DOCUMENTS", "document_type": "", "reason": ""}])
+                    
+                    # Add an empty row as separator
+                    df_empty = pd.DataFrame([{"filepath": "", "document_type": "", "reason": ""}])
+                    
+                    # Concatenate to include in the main sheet
+                    df_all = pd.concat([df, df_empty, df_skipped_header, df_skipped], ignore_index=True)
+                    df = df_all
+                
+                # For cases where there are only skipped docs in a folder
+                elif folder_skipped_docs and df.empty:
+                    df = pd.DataFrame(folder_skipped_docs)
+                    # Select most relevant columns
+                    display_cols = ["filepath", "document_type", "reason"]
+                    display_cols = [col for col in display_cols if col in df.columns]
+                    df = df[display_cols]
+                
                 # Write to Excel
                 if not df.empty:
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Adjust column widths
+                    worksheet = writer.sheets[sheet_name]
+                    for i, col in enumerate(df.columns):
+                        max_width = max(
+                            df[col].astype(str).map(len).max(),
+                            len(col)
+                        ) + 2
+                        worksheet.set_column(i, i, min(max_width, 50))  # Cap width at 50
+            
+            # Create a separate sheet for all skipped documents
+            if all_skipped_docs:
+                skipped_df = pd.DataFrame(all_skipped_docs)
+                
+                # Ensure the DataFrame has all important columns
+                required_cols = ["filepath", "folder_name", "document_type", "reason"]
+                for col in required_cols:
+                    if col not in skipped_df.columns:
+                        skipped_df[col] = None
+                
+                # Select and order columns (include only those that exist)
+                display_cols = [col for col in required_cols if col in skipped_df.columns]
+                skipped_df = skipped_df[display_cols]
+                
+                # Write to Excel
+                skipped_df.to_excel(writer, sheet_name="Skipped_Documents", index=False)
+                
+                # Adjust column widths
+                worksheet = writer.sheets["Skipped_Documents"]
+                for i, col in enumerate(skipped_df.columns):
+                    max_width = max(
+                        skipped_df[col].astype(str).map(len).max(),
+                        len(col)
+                    ) + 2
+                    worksheet.set_column(i, i, min(max_width, 50))  # Cap width at 50
         
-        # Update job status in-memory
-        processed_jobs[job_id] = {
-            "status": "completed",
-            "start_time": time.time(),
-            "end_time": time.time(),
-            "total_files": total_files,
-            "processed_files": processed_files,
-            "output_file_path": excel_path
-        }
+        # Update job status and output file
+        try:
+            cursor.execute('''
+            UPDATE processing_jobs 
+            SET status = 'completed', end_time = %s, output_file_path = %s
+            WHERE job_id = %s
+            ''', (datetime.now(), excel_path, job_id))
+        except Exception as e:
+            # Check if error_message column exists, if not add it
+            if "column \"error_message\" of relation \"processing_jobs\" does not exist" in str(e):
+                # Add the missing column
+                logger.info("Adding missing error_message column to processing_jobs table")
+                cursor.execute('''
+                ALTER TABLE processing_jobs 
+                ADD COLUMN IF NOT EXISTS error_message TEXT
+                ''')
+                conn.commit()
+                
+                # Try the update again
+                cursor.execute('''
+                UPDATE processing_jobs 
+                SET status = 'completed', end_time = %s, output_file_path = %s
+                WHERE job_id = %s
+                ''', (datetime.now(), excel_path, job_id))
+            else:
+                raise e
+        conn.commit()
+        
+        cursor.close()
+        conn.close()
         
         logger.info(f"Job {job_id} completed. Output file: {excel_path}")
         return excel_path
@@ -827,15 +1123,42 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
     except Exception as e:
         logger.error(f"Error processing zip files: {str(e)}")
         
-        # Update job status to failed
-        processed_jobs[job_id] = {
-            "status": "failed",
-            "start_time": time.time(),
-            "end_time": time.time(),
-            "total_files": 0,
-            "processed_files": 0,
-            "error_message": str(e)
-        }
+        try:
+            # Update job status
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            
+            # Check if error_message column exists, if not add it
+            try:
+                cursor.execute('''
+                UPDATE processing_jobs 
+                SET status = 'failed', end_time = %s, error_message = %s
+                WHERE job_id = %s
+                ''', (datetime.now(), str(e), job_id))
+            except Exception as column_error:
+                if "column \"error_message\" of relation \"processing_jobs\" does not exist" in str(column_error):
+                    # Add the missing column
+                    logger.info("Adding missing error_message column to processing_jobs table")
+                    cursor.execute('''
+                    ALTER TABLE processing_jobs 
+                    ADD COLUMN IF NOT EXISTS error_message TEXT
+                    ''')
+                    conn.commit()
+                    
+                    # Try the update again
+                    cursor.execute('''
+                    UPDATE processing_jobs 
+                    SET status = 'failed', end_time = %s, error_message = %s
+                    WHERE job_id = %s
+                    ''', (datetime.now(), str(e), job_id))
+                else:
+                    raise column_error
+                    
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as db_error:
+            logger.error(f"Error updating job status: {str(db_error)}")
         
         # Clean up temp directory
         try:
@@ -845,7 +1168,7 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
         
         raise e
     finally:
-        # Clean up temp directory after a delay
+        # Clean up temp directory after a delay to allow file download
         def delayed_cleanup():
             time.sleep(3600)  # Keep files for 1 hour
             try:
@@ -870,6 +1193,17 @@ async def upload_files(
     Results will be provided in an Excel file with one sheet per folder.
     """
     try:
+        # Initialize database
+        init_db()
+        
+        # Validate file types
+        for file in files:
+            if not file.filename.lower().endswith('.zip'):
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"File {file.filename} is not a zip file. Only zip files are supported."
+                )
+        
         # Generate a unique job ID
         job_id = str(uuid.uuid4())
         
@@ -881,14 +1215,37 @@ async def upload_files(
             file_contents.append(content)
             file_names.append(file.filename)
         
-        # Initialize job status in-memory
-        processed_jobs[job_id] = {
-            "status": "processing",
-            "start_time": time.time(),
-            "total_files": 0,
-            "processed_files": 0,
-            "job_id": job_id
-        }
+        # Initialize job in database
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        try:
+            cursor.execute('''
+            INSERT INTO processing_jobs (job_id, status, start_time, total_files, processed_files)
+            VALUES (%s, %s, %s, %s, %s)
+            ''', (job_id, "processing", datetime.now(), 0, 0))
+            conn.commit()
+        except Exception as e:
+            # Handle column issues
+            if "column \"error_message\" of relation \"processing_jobs\" does not exist" in str(e):
+                # Add the missing column
+                logger.info("Adding missing error_message column to processing_jobs table")
+                cursor.execute('''
+                ALTER TABLE processing_jobs 
+                ADD COLUMN IF NOT EXISTS error_message TEXT
+                ''')
+                conn.commit()
+                
+                # Try the insert again
+                cursor.execute('''
+                INSERT INTO processing_jobs (job_id, status, start_time, total_files, processed_files)
+                VALUES (%s, %s, %s, %s, %s)
+                ''', (job_id, "processing", datetime.now(), 0, 0))
+            else:
+                raise e
+        finally:
+            cursor.close()
+            conn.close()
         
         # Define a wrapper function to handle exceptions and update the job status
         def process_wrapper(job_id, file_contents, file_names):
@@ -900,12 +1257,19 @@ async def upload_files(
                 logger.error(traceback.format_exc())
                 
                 # Update job status to failed
-                processed_jobs[job_id] = {
-                    "status": "failed",
-                    "end_time": time.time(),
-                    "job_id": job_id,
-                    "error_message": str(e)
-                }
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                    UPDATE processing_jobs 
+                    SET status = 'failed', end_time = %s, error_message = %s
+                    WHERE job_id = %s
+                    ''', (datetime.now(), str(e), job_id))
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                except Exception as db_error:
+                    logger.error(f"Error updating job status: {str(db_error)}")
                 
                 # Re-raise to update the future's exception
                 raise
@@ -946,24 +1310,50 @@ async def upload_files(
     except Exception as e:
         logger.error(f"Error in upload endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
+     
 @app.get("/status/{job_id}")
 async def get_job_status(job_id: str):
     """Get the status of a processing job."""
     try:
-        # Try to fetch job from processed_jobs
-        job = processed_jobs.get(job_id)
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=DictCursor)
+
+        cursor.execute('''
+        SELECT * FROM processing_jobs WHERE job_id = %s
+        ''', (job_id,))
+        
+        job = cursor.fetchone()
         
         if not job:
             raise HTTPException(status_code=404, detail=f"Job with ID {job_id} not found")
         
-        # Create a copy to avoid modifying the original
-        job_dict = job.copy()
+        # Convert to dict
+        job_dict = dict(job)
         
-        # Convert timestamps to ISO format if they are numeric
+        # Convert datetime objects to strings
         for key in ["start_time", "end_time"]:
-            if isinstance(job_dict.get(key), (int, float)):
-                job_dict[key] = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(job_dict[key]))
+            if job_dict[key]:
+                job_dict[key] = job_dict[key].isoformat()
+        
+        # Get processing statistics
+        cursor.execute('''
+        SELECT COUNT(*) as total, processing_status, COUNT(*) FILTER (WHERE document_type != 'unknown') as recognized
+        FROM processed_files 
+        WHERE job_id = %s
+        GROUP BY processing_status
+        ''', (job_id,))
+        
+        stats = {}
+        for row in cursor.fetchall():
+            stats[row["processing_status"]] = {
+                "count": row["total"],
+                "recognized": row["recognized"]
+            }
+        
+        job_dict["processing_stats"] = stats
+        
+        cursor.close()
+        conn.close()
         
         return job_dict
         
@@ -977,19 +1367,28 @@ async def get_job_status(job_id: str):
 async def download_results(job_id: str):
     """Download the results of a completed job."""
     try:
-        # Fetch job from processed_jobs
-        job = processed_jobs.get(job_id)
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=DictCursor)
+        
+        cursor.execute('''
+        SELECT status, output_file_path FROM processing_jobs WHERE job_id = %s
+        ''', (job_id,))
+        
+        job = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
         
         if not job:
             raise HTTPException(status_code=404, detail=f"Job with ID {job_id} not found")
         
-        if job.get("status") != "completed":
+        if job["status"] != "completed":
             raise HTTPException(
                 status_code=400, 
-                detail=f"Job is not completed. Current status: {job.get('status', 'unknown')}"
+                detail=f"Job is not completed. Current status: {job['status']}"
             )
         
-        output_path = job.get("output_file_path")
+        output_path = job["output_file_path"]
         
         if not output_path or not os.path.exists(output_path):
             raise HTTPException(status_code=404, detail="Output file not found")
@@ -1006,48 +1405,55 @@ async def download_results(job_id: str):
         logger.error(f"Error downloading results: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
     
+# Add this endpoint to your FastAPI app.py file
+
 @app.get("/stats")
 async def get_stats():
     """Get aggregate statistics for the dashboard."""
     try:
-        # Gather job stats from in-memory processed_jobs
-        job_stats = {}
-        total_recognized_files = 0
-        total_files = 0
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         
-        for job in processed_jobs.values():
-            # Count job statuses
-            status = job.get("status", "unknown")
-            job_stats[status] = job_stats.get(status, 0) + 1
-            
-            # Count files if available
-            total_files += job.get("total_files", 0)
+        # Get job stats
+        cursor.execute('''
+        SELECT status, COUNT(*) as count 
+        FROM processing_jobs 
+        GROUP BY status
+        ''')
+        job_stats = {row["status"]: row["count"] for row in cursor.fetchall()}
         
-        # Compute processing times for last 10 completed jobs
+        # Get file stats
+        cursor.execute('''
+        SELECT 
+            SUM(CASE WHEN document_type != 'unknown' THEN 1 ELSE 0 END) as recognized,
+            COUNT(*) as total
+        FROM processed_files
+        ''')
+        file_stats = cursor.fetchone()
+        
+        # Get processing times
+        cursor.execute('''
+        SELECT job_id, start_time, end_time
+        FROM processing_jobs
+        WHERE status = 'completed'
+        ORDER BY end_time DESC
+        LIMIT 10
+        ''')
         processing_times = []
-        completed_jobs = [
-            job for job in processed_jobs.values() 
-            if job.get("status") == "completed" and 
-               job.get("start_time") and 
-               job.get("end_time")
-        ]
+        for row in cursor.fetchall():
+            if row["start_time"] and row["end_time"]:
+                duration = (row["end_time"] - row["start_time"]).total_seconds()
+                processing_times.append({
+                    "job_id": row["job_id"],
+                    "duration": duration
+                })
         
-        # Sort by end time and take last 10
-        completed_jobs.sort(key=lambda x: x.get('end_time', 0), reverse=True)
-        
-        for job in completed_jobs[:10]:
-            duration = job.get('end_time', 0) - job.get('start_time', 0)
-            processing_times.append({
-                "job_id": job.get("job_id", ""),
-                "duration": duration
-            })
+        cursor.close()
+        conn.close()
         
         return {
             "jobs": job_stats,
-            "files": {
-                "total": total_files,
-                "recognized": total_recognized_files  # Note: This would require tracking recognized files
-            },
+            "files": file_stats,
             "processing_times": processing_times
         }
         
@@ -1059,11 +1465,17 @@ async def get_stats():
 async def health_check():
     """Health check endpoint."""
     try:
+        # Check database connection
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cursor.execute("SELECT 1")
+        cursor.close()
+        conn.close()
+        
         return {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "total_active_jobs": len(active_tasks),
-            "total_processed_jobs": len(processed_jobs)
+            "database": "connected"
         }
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
@@ -1074,5 +1486,7 @@ async def health_check():
         }
 
 if __name__ == "__main__":
+    # Initialize database
+    init_db()
     # Start the FastAPI server
     uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)

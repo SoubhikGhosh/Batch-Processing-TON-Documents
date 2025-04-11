@@ -1,8 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import vertexai
-from vertexai.generative_models import GenerativeModel, SafetySetting
+import google.generativeai as genai
 import os
 import zipfile
 import io
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(
     title="Document Processing API",
-    description="API for processing zip files containing different document types using Vertex AI",
+    description="API for processing zip files containing different document types using OCR and Gemini",
     version="1.0.0"
 )
 
@@ -47,29 +46,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Vertex AI Configuration
-project = "hbl-uat-ocr-fw-app-prj-spk-4d"
-vertexai.init(project=project, location="asia-south1", api_endpoint='asia-south1-aiplatform.googleapis.com')
-
-# Safety settings
-safety_settings = [
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-    SafetySetting(
-        category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold=SafetySetting.HarmBlockThreshold.OFF
-    ),
-]
+# Configure Google API - replace with your API key
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyD2ArK74wBtL1ufYmpyrV2LqaOBrSi3mlU")
+genai.configure(api_key=GOOGLE_API_KEY)
 
 # Document types
 DOCUMENT_TYPES = [
@@ -138,20 +117,21 @@ for field in FIELDS:
         DOCUMENT_FIELDS[doc_type] = []
     DOCUMENT_FIELDS[doc_type].append(field["name"])
 
+# Replicate DocumentProcessor class from previous implementation
 class DocumentProcessor:
-    """Helper class for document processing operations using Vertex AI's multimodal capabilities"""
+    """Helper class for document processing operations using Gemini's multimodal capabilities"""
     
     @staticmethod
     def perform_ocr(file_data: bytes, file_type: str) -> Dict[str, Any]:
-        """Process documents using Vertex AI's multimodal capabilities."""
+        """Process documents using Gemini's multimodal capabilities instead of Tesseract OCR."""
         try:
             result = {"text": "", "pages": []}
             
-            # Initialize Vertex AI model
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)
+            # Initialize Gemini model with multimodal capabilities
+            model = genai.GenerativeModel("gemini-1.5-flash")
             
             if file_type.lower() in ["image/jpeg", "image/jpg", "image/png", "image/tiff"]:
-                # Process image directly with Vertex AI
+                # Process image directly with Gemini
                 response = model.generate_content(
                     [
                         "Extract all text from this document image. Return only the extracted text without additional comments.",
@@ -163,7 +143,7 @@ class DocumentProcessor:
                 result["pages"].append({"page_num": 1, "text": text})
                 
             elif file_type.lower() in ["application/pdf", "pdf"]:
-                # Convert PDF to images and process each page with Vertex AI
+                # Convert PDF to images and process each page with Gemini
                 images = convert_from_bytes(file_data)
                 full_text = ""
                 
@@ -173,7 +153,7 @@ class DocumentProcessor:
                     image.save(img_byte_arr, format="PNG")
                     img_bytes = img_byte_arr.getvalue()
                     
-                    # Process with Vertex AI
+                    # Process with Gemini
                     response = model.generate_content(
                         [
                             "Extract all text from this document image. Return only the extracted text without additional comments.",
@@ -187,21 +167,21 @@ class DocumentProcessor:
                 result["text"] = full_text
                 
             else:
-                logger.warning(f"Unsupported file type for Vertex AI processing: {file_type}")
+                logger.warning(f"Unsupported file type for Gemini processing: {file_type}")
                 result["text"] = "Unsupported file type for processing"
                 result["error"] = f"Unsupported file type: {file_type}"
                 
             return result
             
         except Exception as e:
-            logger.error(f"Error during Vertex AI document processing: {str(e)}")
+            logger.error(f"Error during Gemini document processing: {str(e)}")
             return {"error": str(e), "text": "", "pages": []}
     
     @staticmethod
     def classify_document(text: str) -> Dict[str, Any]:
-        """Classify the document type using Vertex AI."""
+        """Classify the document type using Gemini AI."""
         try:
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)
+            model = genai.GenerativeModel("gemini-1.5-flash")
             
             prompt = """
             You are a document classification expert. Examine the following text extracted from a document and determine which type of financial document it is.
@@ -281,9 +261,9 @@ class DocumentProcessor:
     
     @staticmethod
     def extract_fields(text: str, document_type: str) -> Dict[str, Any]:
-        """Extract fields from document using Vertex AI."""
+        """Extract fields from document using Gemini AI."""
         try:
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)       
+            model = genai.GenerativeModel("gemini-1.5-flash")
             
             # Get fields for this document type
             doc_fields = DOCUMENT_FIELDS.get(document_type, [])
@@ -410,11 +390,10 @@ class DocumentProcessor:
             
     @staticmethod
     def process_multimodal_document(file_data: bytes, file_type: str) -> Dict[str, Any]:
-        """Process a document using Vertex AI's multimodal capabilities."""
+        """Process a document using Gemini's multimodal capabilities for both classification and extraction."""
         try:
-            # Initialize Vertex AI model
-            model = GenerativeModel("gemini-1.5-flash-002", safety_settings=safety_settings)
-            
+            # Initialize Gemini model with multimodal capabilities
+            model = genai.GenerativeModel("gemini-1.5-flash")
             result = {}
             
             # For images, process directly
@@ -607,18 +586,7 @@ class DocumentProcessor:
                 "confidence": 0.0,
                 "extracted_fields": []
             }
-            
-        except Exception as e:
-            logger.error(f"Error during multimodal document processing: {str(e)}")
-            return {
-                "error": str(e),
-                "text": "",
-                "pages": [],
-                "document_type": "unknown",
-                "confidence": 0.0,
-                "extracted_fields": []
-            }
-
+ 
 def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id: str):
     """Process multiple zip files and generate Excel report using Gemini's multimodal capabilities."""
 
@@ -1075,4 +1043,4 @@ async def health_check():
 
 if __name__ == "__main__":
     # Start the FastAPI server
-    uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("trial:app", host="0.0.0.0", port=8080, reload=True)

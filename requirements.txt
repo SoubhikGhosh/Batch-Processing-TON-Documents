@@ -1,12 +1,28 @@
+# Core Web Framework
 fastapi
 uvicorn
-psycopg2-binary
+
+# AI and Machine Learning
+vertexai
+google-cloud-aiplatform
+
+# Data Processing
 pandas
-pytesseract
-pdf2image
-pillow
-python-multipart
 openpyxl
 xlsxwriter
-google-generativeai
-aiofiles
+
+# File Handling
+python-multipart
+python-magic
+filetype
+pypdf
+
+# Image Processing
+Pillow
+pdf2image
+pytesseract
+
+# Utility Libraries
+uuid
+typing
+tenacity
