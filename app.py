@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import vertexai
-from vertexai.generative_models import GenerativeModel, SafetySetting
+from vertexai.generative_models import GenerativeModel, SafetySetting, Part
 import os
 import zipfile
 import io
@@ -417,6 +417,9 @@ class DocumentProcessor:
             
             result = {}
             
+            # Create a Vertex AI Part from the file data
+            file_part = Part.from_data(data=file_data, mime_type=file_type)
+            
             # For images, process directly
             if file_type.lower() in ["image/jpeg", "image/jpg", "image/png", "image/tiff"]:
                 # First, classify the document type using the image directly
@@ -439,7 +442,7 @@ class DocumentProcessor:
                 
                 classification_response = model.generate_content([
                     classification_prompt,
-                    {"mime_type": file_type, "data": file_data}
+                    file_part
                 ])
                 
                 json_str = classification_response.text.strip()
@@ -468,7 +471,7 @@ class DocumentProcessor:
                 
                 extraction_response = model.generate_content([
                     extraction_prompt,
-                    {"mime_type": file_type, "data": file_data}
+                    file_part
                 ])
                 
                 extraction_json_str = extraction_response.text.strip()
@@ -501,6 +504,9 @@ class DocumentProcessor:
                     image.save(img_byte_arr, format="PNG")
                     img_bytes = img_byte_arr.getvalue()
                     
+                    # Create Vertex AI Part for this image
+                    page_part = Part.from_data(data=img_bytes, mime_type="image/png")
+                    
                     # If it's the first page, classify the document
                     if i == 0:
                         classification_prompt = """
@@ -522,7 +528,7 @@ class DocumentProcessor:
                         
                         classification_response = model.generate_content([
                             classification_prompt,
-                            {"mime_type": "image/png", "data": img_bytes}
+                            page_part
                         ])
                         
                         json_str = classification_response.text.strip()
@@ -539,7 +545,7 @@ class DocumentProcessor:
                     text_prompt = "Extract all text from this document image. Return only the extracted text."
                     text_response = model.generate_content([
                         text_prompt,
-                        {"mime_type": "image/png", "data": img_bytes}
+                        page_part
                     ])
                     page_text = text_response.text.strip()
                     full_text += page_text + "\n\n"
@@ -585,7 +591,7 @@ class DocumentProcessor:
                 }
                 
             else:
-                logger.warning(f"Unsupported file type for Gemini processing: {file_type}")
+                logger.warning(f"Unsupported file type for Vertex AI processing: {file_type}")
                 result = {
                     "error": f"Unsupported file type: {file_type}",
                     "text": "",
@@ -607,18 +613,6 @@ class DocumentProcessor:
                 "confidence": 0.0,
                 "extracted_fields": []
             }
-            
-        except Exception as e:
-            logger.error(f"Error during multimodal document processing: {str(e)}")
-            return {
-                "error": str(e),
-                "text": "",
-                "pages": [],
-                "document_type": "unknown",
-                "confidence": 0.0,
-                "extracted_fields": []
-            }
-
 def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id: str):
     """Process multiple zip files and generate Excel report using Gemini's multimodal capabilities."""
 
