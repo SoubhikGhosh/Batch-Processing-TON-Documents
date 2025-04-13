@@ -653,28 +653,6 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
             "processed_files": 0,
             "error_message": str(e)
         }
-        
-        # Clean up temp directory
-        try:
-            shutil.rmtree(temp_dir)
-        except Exception as cleanup_error:
-            logger.error(f"Error cleaning up temp directory: {str(cleanup_error)}")
-        
-        raise e
-    finally:
-        # Clean up temp directory after a delay
-        def delayed_cleanup():
-            time.sleep(3600)  # Keep files for 1 hour
-            try:
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                    logger.info(f"Cleaned up temp directory: {temp_dir}")
-            except Exception as e:
-                logger.error(f"Error during delayed cleanup: {str(e)}")
-        
-        # Start cleanup in background
-        import threading
-        threading.Thread(target=delayed_cleanup).start()
 
 @app.post("/upload")
 async def upload_files(
@@ -763,33 +741,7 @@ async def upload_files(
     except Exception as e:
         logger.error(f"Error in upload endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.get("/status/{job_id}")
-async def get_job_status(job_id: str):
-    """Get the status of a processing job."""
-    try:
-        # Try to fetch job from processed_jobs
-        job = processed_jobs.get(job_id)
-        
-        if not job:
-            raise HTTPException(status_code=404, detail=f"Job with ID {job_id} not found")
-        
-        # Create a copy to avoid modifying the original
-        job_dict = job.copy()
-        
-        # Convert timestamps to ISO format if they are numeric
-        for key in ["start_time", "end_time"]:
-            if isinstance(job_dict.get(key), (int, float)):
-                job_dict[key] = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(job_dict[key]))
-        
-        return job_dict
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting job status: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-   
+  
 @app.get("/download/{job_id}")
 async def download_results(job_id: str):
     """Download the results of a completed job."""
@@ -823,73 +775,6 @@ async def download_results(job_id: str):
         logger.error(f"Error downloading results: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
     
-@app.get("/stats")
-async def get_stats():
-    """Get aggregate statistics for the dashboard."""
-    try:
-        # Gather job stats from in-memory processed_jobs
-        job_stats = {}
-        total_recognized_files = 0
-        total_files = 0
-        
-        for job in processed_jobs.values():
-            # Count job statuses
-            status = job.get("status", "unknown")
-            job_stats[status] = job_stats.get(status, 0) + 1
-            
-            # Count files if available
-            total_files += job.get("total_files", 0)
-        
-        # Compute processing times for last 10 completed jobs
-        processing_times = []
-        completed_jobs = [
-            job for job in processed_jobs.values() 
-            if job.get("status") == "completed" and 
-               job.get("start_time") and 
-               job.get("end_time")
-        ]
-        
-        # Sort by end time and take last 10
-        completed_jobs.sort(key=lambda x: x.get('end_time', 0), reverse=True)
-        
-        for job in completed_jobs[:10]:
-            duration = job.get('end_time', 0) - job.get('start_time', 0)
-            processing_times.append({
-                "job_id": job.get("job_id", ""),
-                "duration": duration
-            })
-        
-        return {
-            "jobs": job_stats,
-            "files": {
-                "total": total_files,
-                "recognized": total_recognized_files  # Note: This would require tracking recognized files
-            },
-            "processing_times": processing_times
-        }
-        
-    except Exception as e:
-        logger.error(f"Error fetching statistics: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    try:
-        return {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "total_active_jobs": len(active_tasks),
-            "total_processed_jobs": len(processed_jobs)
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        return {
-            "status": "unhealthy",
-            "timestamp": datetime.now().isoformat(),
-            "error": str(e)
-        }
-
 if __name__ == "__main__":
     # Start the FastAPI server
     uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)

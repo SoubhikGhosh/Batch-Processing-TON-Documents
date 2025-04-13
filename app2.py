@@ -1160,27 +1160,6 @@ def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id:
         except Exception as db_error:
             logger.error(f"Error updating job status: {str(db_error)}")
         
-        # Clean up temp directory
-        try:
-            shutil.rmtree(temp_dir)
-        except Exception as cleanup_error:
-            logger.error(f"Error cleaning up temp directory: {str(cleanup_error)}")
-        
-        raise e
-    finally:
-        # Clean up temp directory after a delay to allow file download
-        def delayed_cleanup():
-            time.sleep(3600)  # Keep files for 1 hour
-            try:
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                    logger.info(f"Cleaned up temp directory: {temp_dir}")
-            except Exception as e:
-                logger.error(f"Error during delayed cleanup: {str(e)}")
-        
-        # Start cleanup in background
-        import threading
-        threading.Thread(target=delayed_cleanup).start()
 
 @app.post("/upload")
 async def upload_files(
