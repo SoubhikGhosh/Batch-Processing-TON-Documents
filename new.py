@@ -165,7 +165,7 @@ class DocumentProcessor:
     """Helper class for document processing operations using Vertex AI's multimodal capabilities"""
                   
     @staticmethod
-    def process_multimodal_document(file_data: bytes, file_type: str) -> Dict[str, Any]:
+    def process_multimodal_document(file_data: bytes, file_type: str, file_path: str) -> Dict[str, Any]:
         """Process a document using Vertex AI's multimodal capabilities."""
         try:
             # Initialize Vertex AI model
@@ -178,99 +178,16 @@ class DocumentProcessor:
             
             # For images, process directly
             if file_type.lower() in ["image/jpeg", "image/jpg", "image/png", "image/tiff"]:
-                # First, classify the document type using the image directly
-                classification_prompt = """
-                You are a document classification expert. Examine the following text extracted from a document and determine which type of financial document it is.
-                
-                Classify the document into EXACTLY ONE of these categories:
-                - customer_request_letter
-                - form_15ca
-                - form_15cb
-                - form_a2
-                - invoice
-                - transport_document
-                - fdd_stationery
-                - unknown
-                
-                Look for specific headers, formatting patterns, and content that uniquely identify each document type:
-                
-                ### Customer Request Letter
-                - Typically contains: "Request for remittance", "Outward remittance", or similar phrases
-                - Usually has beneficiary details, bank details, and remittance amount
-                - Often contains a formal request structure with date and signature
-                
-                ### Form 15CA
-                - Official Indian tax form for foreign remittances
-                - Contains "FORM 15CA" in the header
-                - Has sections related to Income Tax Act and remittance declarations
-                - Contains an acknowledgment number
-                
-                ### Form 15CB
-                - Certificate from Chartered Accountant related to foreign remittances
-                - Contains "FORM 15CB" in the header
-                - Has CA certification and registration numbers
-                
-                ### Form A2
-                - Foreign exchange transaction form
-                - Contains "FORM A2" in the header
-                - Has sections for purpose codes and forex transaction details
-                
-                ### Invoice
-                - May have a Header mentioning Invoice
-                - Contains line items with quantities, unit prices, and totals
-                - Has invoice number, date, and payment terms
-                - Lists buyer and seller information
-                
-                ### Transport Document
-                - Bill of Lading (B/L), Airway Bill, or similar
-                - Contains shipping details, ports, vessel information
-                - Has consignor and consignee information
-                
-                ### FDD Stationery
-                - Foreign Demand Draft document
-                - Contains DD number and banking instrument details
-                
-                Provide your classification as a simple JSON with two fields:
-                {
-                    "document_type": "one of the categories listed above",
-                    "confidence": 0.XX (a number between 0 and 1)
-                }
-                
-                Return ONLY this JSON with no explanations or additional text.
-                """
-                
-                classification_response = model.generate_content([
-                    classification_prompt,
-                    file_part
-                ])
-                
-                json_str = classification_response.text.strip()
-                logger.info(f"Raw classification response: {json_str}")
-                
-                # Clean up the JSON string to handle markdown code blocks and any text before/after
-                json_str = DocumentProcessor._extract_json_from_text(json_str)
-                
-                try:
-                    classification = json.loads(json_str)
-                    document_type = classification.get("document_type", "unknown")
-                    confidence = classification.get("confidence", 0.0)
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON parsing error in classification: {e}, Raw response: {json_str}")
-                    return {
-                        "error": f"Failed to parse classification response: {str(e)}",
-                        "text": "",
-                        "pages": [],
-                        "document_type": "unknown",
-                        "confidence": 0.0,
-                        "extracted_fields": []
-                    }
+                # Extract document type from filename instead of using classification prompt
+                document_type, confidence = DocumentProcessor._classify_by_filename(os.path.basename(file_path))
+                logger.info(f"Classified {file_path} as {document_type} with confidence {confidence}")
                 
                 # Now extract text and fields based on the document type
                 doc_fields = DOCUMENT_FIELDS.get(document_type, [])
                 fields_str = ", ".join(doc_fields)
 
                 field_descriptions = {
-                    "currency": "The currency for the transaction (e.g., USD, EUR, GBP)",
+                    "currency": "The currency for the transaction (e.g., USD, EUR, GBP, INR)",
                     "amount": "The amount of money being transferred",
                     "beneficiary_account_number": "The bank account number of the recipient",
                     "beneficiary_name": "The name of the person or entity receiving the funds",
@@ -295,7 +212,7 @@ class DocumentProcessor:
                     "on_board_date": "The date when goods were loaded on vessel",
                     "remittance_information": "Details about the purpose of the remittance",
                     "purpose_code": "The code indicating the purpose of the foreign exchange transaction",
-                    "form_15ca": "Details from the Form 15CA document",
+                    "form_15ca": "Details from the Form 15CA document. The full text of the whole document",
                     "customer_request_letter_date": "The date on the customer request letter",
                     "payment_reference_drawer": "Reference information for the payment drawer",
                     "goods_description": "Description of the goods on the invoice",
@@ -414,6 +331,63 @@ class DocumentProcessor:
             }
     
     @staticmethod
+    def _classify_by_filename(filename: str) -> Tuple[str, float]:
+        """
+        Classify document type based on filename patterns.
+        Returns a tuple of (document_type, confidence)
+        
+        Examples:
+        - 15CA00000001.tif -> form_15ca
+        - 15CB000000000171.tif -> form_15cb
+        - A200000654.tif -> form_a2
+        - CRL00000001.tif -> customer_request_letter
+        - Batch101.tif -> fdd_stationery
+        - invoice00000000171.tif -> invoice
+        - Transport00000000.tif -> transport_document
+        """
+        # Convert filename to lowercase for case-insensitive matching
+        filename_lower = filename.lower()
+        
+        # Strip extensions and any parenthetical parts like " (1)" or " (2)"
+        base_filename = re.sub(r'\s*\(\d+\).*$', '', filename_lower)
+        base_filename = os.path.splitext(base_filename)[0]
+        
+        # Define pattern matchers with confidence levels
+        patterns = [
+            (r'^15ca\d+', 'form_15ca', 0.95),  # 15CA followed by numbers
+            (r'^15cb\d+', 'form_15cb', 0.95),  # 15CB followed by numbers
+            (r'^a2\d+', 'form_a2', 0.9),       # A2 followed by numbers
+            (r'^crl\d+', 'customer_request_letter', 0.9),  # CRL followed by numbers
+            (r'^batch\d+', 'fdd_stationery', 0.85),  # Batch followed by numbers
+            (r'^invoice\d+', 'invoice', 0.9),   # Invoice followed by numbers
+            (r'^transport\d+', 'transport_document', 0.9),  # Transport followed by numbers
+        ]
+        
+        # Try to match against patterns
+        for pattern, doc_type, confidence in patterns:
+            if re.match(pattern, base_filename):
+                return doc_type, confidence
+        
+        # Additional checks for specific patterns
+        if "15ca" in base_filename:
+            return "form_15ca", 0.8
+        elif "15cb" in base_filename:
+            return "form_15cb", 0.8
+        elif "a2" in base_filename:
+            return "form_a2", 0.8
+        elif "crl" in base_filename or "request" in base_filename or "letter" in base_filename:
+            return "customer_request_letter", 0.8
+        elif "fdd" in base_filename or "batch" in base_filename:
+            return "fdd_stationery", 0.8
+        elif "invoice" in base_filename:
+            return "invoice", 0.8
+        elif "transport" in base_filename or "shipping" in base_filename or "bl" in base_filename:
+            return "transport_document", 0.8
+            
+        # Default to unknown if no pattern matched
+        return "unknown", 0.5
+    
+    @staticmethod
     def _extract_json_from_text(text: str) -> str:
         """
         Extract valid JSON from potentially messy text that might contain
@@ -458,7 +432,8 @@ class DocumentProcessor:
             futures = {
                 batch_executor.submit(DocumentProcessor.process_multimodal_document, 
                                      file_info['data'], 
-                                     file_info['type']): file_info 
+                                     file_info['type'],
+                                     file_info['path']): file_info 
                 for file_info in file_batch
             }
             
@@ -483,7 +458,6 @@ class DocumentProcessor:
                     })
         
         return results
-
 # ============ OPTIMIZED ZIP FILE PROCESSING FUNCTION ============
 def process_zip_files(file_contents: List[bytes], file_names: List[str], job_id: str):
     """Process multiple zip files and generate Excel report using Gemini's multimodal capabilities with parallel processing."""
