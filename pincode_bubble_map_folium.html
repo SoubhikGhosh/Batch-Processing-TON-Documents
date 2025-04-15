@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html>
+<head>
+    
+    <meta http-equiv="content-type" content="text/html; charset=UTF-8" />
+    
+        <script>
+            L_NO_TOUCH = false;
+            L_DISABLE_3D = false;
+        </script>
+    
+    <style>html, body {width: 100%;height: 100%;margin: 0;padding: 0;}</style>
+    <style>#map {position:absolute;top:0;bottom:0;right:0;left:0;}</style>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.js"></script>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.css"/>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/css/bootstrap.min.css"/>
+    <link rel="stylesheet" href="https://netdna.bootstrapcdn.com/bootstrap/3.0.0/css/bootstrap-glyphicons.css"/>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.2.0/css/all.min.css"/>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.css"/>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/python-visualization/folium/folium/templates/leaflet.awesome.rotate.min.css"/>
+    
+            <meta name="viewport" content="width=device-width,
+                initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+            <style>
+                #map_b7366e982de0e05a1ea5157886bf01f5 {
+                    position: relative;
+                    width: 100.0%;
+                    height: 100.0%;
+                    left: 0.0%;
+                    top: 0.0%;
+                }
+                .leaflet-container { font-size: 1rem; }
+            </style>
+        
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.1.0/leaflet.markercluster.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.1.0/MarkerCluster.css"/>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.1.0/MarkerCluster.Default.css"/>
+</head>
+<body>
+    
+    
+            <div class="folium-map" id="map_b7366e982de0e05a1ea5157886bf01f5" ></div>
+        
+</body>
+<script>
+    
+    
+            var map_b7366e982de0e05a1ea5157886bf01f5 = L.map(
+                "map_b7366e982de0e05a1ea5157886bf01f5",
+                {
+                    center: [12.995524825, 77.58106576592712],
+                    crs: L.CRS.EPSG3857,
+                    ...{
+  "zoom": 11,
+  "zoomControl": true,
+  "preferCanvas": false,
+}
+
+                }
+            );
+
+            
+
+        
+    
+            var tile_layer_a777f913a16b85cb9c28569bbd43b17c = L.tileLayer(
+                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+                {
+  "minZoom": 0,
+  "maxZoom": 19,
+  "maxNativeZoom": 19,
+  "noWrap": false,
+  "attribution": "\u0026copy; \u003ca href=\"https://www.openstreetmap.org/copyright\"\u003eOpenStreetMap\u003c/a\u003e contributors",
+  "subdomains": "abc",
+  "detectRetina": false,
+  "tms": false,
+  "opacity": 1,
+}
+
+            );
+        
+    
+            tile_layer_a777f913a16b85cb9c28569bbd43b17c.addTo(map_b7366e982de0e05a1ea5157886bf01f5);
+        
+    
+            var marker_cluster_fd1ad5fec12e09c26ca21968be0758ab = L.markerClusterGroup(
+                {
+}
+            );
+        
+    
+            var circle_marker_a201c6ee9d20e1fc2ddd9926948aaba3 = L.circleMarker(
+                [12.977304199999999, 77.62653690444957],
+                {"bubblingMouseEvents": true, "color": "blue", "dashArray": null, "dashOffset": null, "fill": true, "fillColor": "blue", "fillOpacity": 0.6, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "opacity": 1.0, "radius": 30.0, "stroke": true, "weight": 3}
+            ).addTo(marker_cluster_fd1ad5fec12e09c26ca21968be0758ab);
+        
+    
+        var popup_f7289a908b2ef493d215ad5f56d82589 = L.popup({
+  "maxWidth": "100%",
+});
+
+        
+            
+                var html_d1bab8e7144e9282f301f820193b8f2c = $(`<div id="html_d1bab8e7144e9282f301f820193b8f2c" style="width: 100.0%; height: 100.0%;"><b>Pincode:</b> 560008<br><b>Count:</b> 3</div>`)[0];
+                popup_f7289a908b2ef493d215ad5f56d82589.setContent(html_d1bab8e7144e9282f301f820193b8f2c);
+            
+        
+
+        circle_marker_a201c6ee9d20e1fc2ddd9926948aaba3.bindPopup(popup_f7289a908b2ef493d215ad5f56d82589)
+        ;
+
+        
+    
+    
+            circle_marker_a201c6ee9d20e1fc2ddd9926948aaba3.bindTooltip(
+                `<div>
+                     Pincode: 560008
+                 </div>`,
+                {
+  "sticky": true,
+}
+            );
+        
+    
+            var circle_marker_de0b2aa6e758fc89c4b3661d6c1a679d = L.circleMarker(
+                [13.01374545, 77.53559462740469],
+                {"bubblingMouseEvents": true, "color": "blue", "dashArray": null, "dashOffset": null, "fill": true, "fillColor": "blue", "fillOpacity": 0.6, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "opacity": 1.0, "radius": 10.0, "stroke": true, "weight": 3}
+            ).addTo(marker_cluster_fd1ad5fec12e09c26ca21968be0758ab);
+        
+    
+        var popup_4873a325d413e485050690f014efdaad = L.popup({
+  "maxWidth": "100%",
+});
+
+        
+            
+                var html_0548211413a8a04c29db01b88fa5d3ca = $(`<div id="html_0548211413a8a04c29db01b88fa5d3ca" style="width: 100.0%; height: 100.0%;"><b>Pincode:</b> 560096<br><b>Count:</b> 1</div>`)[0];
+                popup_4873a325d413e485050690f014efdaad.setContent(html_0548211413a8a04c29db01b88fa5d3ca);
+            
+        
+
+        circle_marker_de0b2aa6e758fc89c4b3661d6c1a679d.bindPopup(popup_4873a325d413e485050690f014efdaad)
+        ;
+
+        
+    
+    
+            circle_marker_de0b2aa6e758fc89c4b3661d6c1a679d.bindTooltip(
+                `<div>
+                     Pincode: 560096
+                 </div>`,
+                {
+  "sticky": true,
+}
+            );
+        
+    
+            marker_cluster_fd1ad5fec12e09c26ca21968be0758ab.addTo(map_b7366e982de0e05a1ea5157886bf01f5);
+        
+    
+            tile_layer_a777f913a16b85cb9c28569bbd43b17c.addTo(map_b7366e982de0e05a1ea5157886bf01f5);
+        
+    
+            marker_cluster_fd1ad5fec12e09c26ca21968be0758ab.addTo(map_b7366e982de0e05a1ea5157886bf01f5);
+        
+</script>
+</html>
